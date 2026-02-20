@@ -23,6 +23,7 @@ uvicorn app.main:app --reload --port 8000
 ```bash
 cd frontend-next
 npm install
+touch .env.example
 cp .env.example .env.local  # Configure API URL
 npm run dev
 ```
