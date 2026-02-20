@@ -1,9 +1,38 @@
 @import "tailwindcss";
-@import "leaflet/dist/leaflet.css";
+
+/* ─── City Walker Design System ─── */
+/* Aesthetic: Urban Cartographic — warm parchment tones, 
+   ink-dark accents, compass-rose gold. A travel journal 
+   brought to life on screen. */
 
 :root {
-  --color-accent: #f59e0b;
-  --color-accent-light: #fbbf24;
+  /* Palette */
+  --ink: #1a1a2e;
+  --ink-light: #3d3d56;
+  --parchment: #faf8f4;
+  --parchment-warm: #f5f0e8;
+  --compass-gold: #d4a853;
+  --compass-gold-light: #e8c97a;
+  --compass-gold-dark: #b8923e;
+  --trail-green: #4a7c59;
+  --trail-green-light: #e8f0eb;
+  --sunset-coral: #d4654a;
+  --mist: #e8e4de;
+  --mist-dark: #c9c3b8;
+  --sky: #7ba7c2;
+
+  /* Typography — loaded via next/font in layout.tsx, sets --font-display and --font-body on <html> */
+
+  /* Spacing rhythm */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+
+  /* Shadows */
+  --shadow-card: 0 4px 24px -4px rgba(26, 26, 46, 0.08), 0 1px 4px rgba(26, 26, 46, 0.04);
+  --shadow-elevated: 0 12px 40px -8px rgba(26, 26, 46, 0.14), 0 4px 12px rgba(26, 26, 46, 0.06);
+  --shadow-float: 0 20px 60px -12px rgba(26, 26, 46, 0.18), 0 8px 20px rgba(26, 26, 46, 0.08);
 }
 
 * {
@@ -17,57 +46,71 @@ html, body {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f4f4f5;
-  color: #18181b;
+  font-family: var(--font-body);
+  background: var(--parchment);
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
 }
 
-/* Scrollbar */
+/* ─── Scrollbar ─── */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f4f4f5;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #a1a1aa;
-  border-radius: 3px;
+  background: var(--mist-dark);
+  border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #71717a;
+  background: var(--ink-light);
 }
 
-/* Animations */
+/* ─── Animations ─── */
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
 }
 
 @keyframes slideUp {
-  from { 
-    opacity: 0;
-    transform: translateY(16px);
-  }
-  to { 
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes scaleIn {
-  from {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes pulse-gold {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 168, 83, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(212, 168, 83, 0); }
+}
+
+@keyframes compass-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes bounce-subtle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
 }
 
 .animate-fade-in {
@@ -75,137 +118,159 @@ body {
 }
 
 .animate-slide-up {
-  animation: slideUp 0.5s ease-out forwards;
+  animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-slide-down {
+  animation: slideDown 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .animate-scale-in {
-  animation: scaleIn 0.3s ease-out forwards;
+  animation: scaleIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Leaflet overrides */
-.leaflet-container {
-  background: #f8fafc !important;
-  font-family: inherit !important;
+.animate-shimmer {
+  background: linear-gradient(90deg, var(--mist) 25%, var(--parchment) 50%, var(--mist) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
 }
 
-.leaflet-control-zoom {
-  border: none !important;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
-  border-radius: 10px !important;
+.animate-pulse-gold {
+  animation: pulse-gold 2s ease-in-out infinite;
+}
+
+/* ─── MapLibre Overrides ─── */
+.maplibregl-map {
+  font-family: var(--font-body) !important;
+}
+
+.maplibregl-ctrl-group {
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4) !important;
   overflow: hidden;
-  margin-bottom: 20px !important;
-  margin-right: 16px !important;
+  background: rgba(30, 30, 50, 0.85) !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.08) !important;
 }
 
-.leaflet-control-zoom a {
-  background: white !important;
-  color: #18181b !important;
+.maplibregl-ctrl-group button {
+  width: 42px !important;
+  height: 42px !important;
+  background: transparent !important;
+  color: rgba(255,255,255,0.7) !important;
   border: none !important;
-  width: 40px !important;
-  height: 40px !important;
-  line-height: 40px !important;
-  font-size: 20px !important;
-  transition: background 0.2s ease !important;
+  border-bottom: 1px solid rgba(255,255,255,0.06) !important;
 }
 
-.leaflet-control-zoom a:hover {
-  background: #f4f4f5 !important;
+.maplibregl-ctrl-group button:hover {
+  background: rgba(255,255,255,0.08) !important;
+  color: var(--compass-gold) !important;
 }
 
-.leaflet-control-zoom-in {
-  border-bottom: 1px solid #e4e4e7 !important;
-  border-radius: 10px 10px 0 0 !important;
+.maplibregl-ctrl-group button + button {
+  border-top: none !important;
 }
 
-.leaflet-control-zoom-out {
-  border-radius: 0 0 10px 10px !important;
-}
-
-.leaflet-control-attribution {
-  background: rgba(255, 255, 255, 0.9) !important;
-  padding: 4px 8px !important;
+.maplibregl-ctrl-attrib {
+  background: rgba(20, 20, 40, 0.7) !important;
+  backdrop-filter: blur(8px) !important;
   font-size: 10px !important;
-  color: #71717a !important;
+  font-family: var(--font-body) !important;
+  color: rgba(255,255,255,0.4) !important;
 }
 
-/* Custom marker styles */
-.custom-marker {
-  background: transparent !important;
-  border: none !important;
+.maplibregl-ctrl-attrib a {
+  color: rgba(255,255,255,0.5) !important;
 }
 
-.starting-point-marker {
-  background: transparent !important;
-  border: none !important;
+/* Terrain control icon — match dark glass theme */
+.maplibregl-ctrl-terrain {
+  background: rgba(30, 30, 50, 0.85) !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4) !important;
 }
 
-/* Tailwind animate-in utilities */
+/* ─── Map Marker Animations ─── */
+@keyframes poiPopIn {
+  0% { opacity: 0; transform: scale(0) translateY(10px); }
+  60% { opacity: 1; transform: scale(1.15) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes routeMarkerPop {
+  0% { opacity: 0; transform: scale(0); }
+  70% { transform: scale(1.2); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* ─── Z-index layers ─── */
+.z-1000 { z-index: 1000; }
+.z-1001 { z-index: 1001; }
+
+/* ─── POI Marker Interactions ─── */
+.poi-marker-wrap:hover > div {
+  transform: scale(1.12);
+}
+
+.poi-marker-wrap > div {
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ─── Tailwind animate-in utilities ─── */
 @keyframes slide-in-from-bottom-4 {
-  from {
-    opacity: 0;
-    transform: translateY(16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-from-top-2 {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .animate-in {
-  animation-duration: 0.3s;
+  animation-duration: 0.35s;
   animation-fill-mode: forwards;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .slide-in-from-bottom-4 {
   animation-name: slide-in-from-bottom-4;
 }
 
-/* Suggested place marker styles */
-.suggested-place-marker {
-  background: transparent !important;
-  border: none !important;
+.slide-in-from-top-2 {
+  animation-name: slide-in-from-top-2;
 }
 
-/* Leaflet tooltip for place names */
-.place-tooltip,
-.poi-tooltip {
-  background: rgba(24, 24, 27, 0.95) !important;
-  border: none !important;
-  border-radius: 8px !important;
-  padding: 6px 12px !important;
-  font-size: 13px !important;
-  font-weight: 500 !important;
-  color: white !important;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+/* ─── Glass morphism utility ─── */
+.glass {
+  background: rgba(250, 248, 244, 0.85);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
 }
 
-.place-tooltip::before,
-.poi-tooltip::before {
-  border-top-color: rgba(24, 24, 27, 0.95) !important;
+.glass-dark {
+  background: rgba(26, 26, 46, 0.88);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
 }
 
-.leaflet-tooltip-top.poi-tooltip::before {
-  border-top-color: rgba(24, 24, 27, 0.95) !important;
+/* ─── Grain texture overlay (frontend-design: backgrounds & visual details) ─── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
 }
 
-/* Z-index fixes for map overlays */
-.z-1000 {
-  z-index: 1000;
-}
-
-.z-1001 {
-  z-index: 1001;
-}
-
-
-/* POI marker hover effect */
-.poi-marker div:hover,
-.suggested-poi-marker div:hover {
-  transform: scale(1.1);
-}
-
-/* Smooth marker transitions */
-.poi-marker,
-.suggested-poi-marker {
-  transition: transform 0.2s ease;
+/* ─── Hover surprise effects (frontend-design: hover states that surprise) ─── */
+.glass:hover {
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
 }

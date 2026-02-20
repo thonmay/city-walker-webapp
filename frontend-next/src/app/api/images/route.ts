@@ -16,9 +16,16 @@ const UNSPLASH_API = 'https://api.unsplash.com/search/photos';
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
-export interface ImageRequest {
-    places: Array<{ name: string; city: string; type?: string }>;
-}
+import { z } from 'zod';
+
+/* Input validation (fullstack-developer: validate all inputs) */
+const imageRequestSchema = z.object({
+    places: z.array(z.object({
+        name: z.string().min(1),
+        city: z.string().min(1),
+        type: z.string().optional(),
+    })).min(1, 'At least one place is required').max(20),
+});
 
 export interface PlaceImages {
     name: string;
@@ -290,12 +297,17 @@ async function getMultipleImages(
 
 export async function POST(req: Request) {
     try {
-        const body: ImageRequest = await req.json();
-        const { places } = body;
+        const body = await req.json();
+        const parsed = imageRequestSchema.safeParse(body);
 
-        if (!places?.length) {
-            return Response.json({ error: 'places array is required' }, { status: 400 });
+        if (!parsed.success) {
+            return Response.json(
+                { error: 'Invalid input', details: parsed.error.issues },
+                { status: 400 }
+            );
         }
+
+        const { places } = parsed.data;
 
         // Fetch images for all places in parallel (with batch limit)
         const batchSize = 3; // Lower batch size since each place now fetches multiple

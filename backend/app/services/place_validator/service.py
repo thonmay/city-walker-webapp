@@ -10,6 +10,7 @@ Requirements: 2.1, 2.6
 """
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -24,6 +25,8 @@ from app.models import (
 )
 from app.services.wikipedia import WikipediaService
 from app.utils.geo import haversine_distance
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -125,11 +128,11 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
         # First, get city info for validation
         city_info = await self._get_city_info(client, city)
         if not city_info:
-            print(f"[PLACE] WARNING: Could not get city info for {city}")
+            logger.info(f"[PLACE] WARNING: Could not get city info for {city}")
             # Fallback to simple search but be very strict
             return await self._simple_geocode(client, name, city)
         
-        print(f"[PLACE] City {city}: center=({city_info['lat']:.4f}, {city_info['lon']:.4f}), country={city_info.get('country', 'unknown')}")
+        logger.info(f"[PLACE] City {city}: center=({city_info['lat']:.4f}, {city_info['lon']:.4f}), country={city_info.get('country', 'unknown')}")
         
         # Strategy 1: Structured search with viewbox constraint (most reliable)
         result = await self._geocode_with_viewbox(client, name, city_info)
@@ -141,7 +144,7 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
         if result:
             return result
         
-        print(f"[PLACE] Could not find {name} in {city}")
+        logger.info(f"[PLACE] Could not find {name} in {city}")
         return None
 
     async def _get_city_info(self, client: httpx.AsyncClient, city: str) -> dict | None:
@@ -174,7 +177,7 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                     "display_name": result.get("display_name", ""),
                 }
         except Exception as e:
-            print(f"[PLACE] Error getting city info: {e}")
+            logger.info(f"[PLACE] Error getting city info: {e}")
         return None
 
     async def _geocode_with_viewbox(self, client: httpx.AsyncClient, name: str, city_info: dict) -> dict | None:
@@ -204,13 +207,13 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                 lon = float(result.get("lon", 0))
                 
                 if lat != 0 and lon != 0:
-                    distance = self._haversine_distance(lat, lon, city_info["lat"], city_info["lon"])
-                    print(f"[PLACE] Found {name} via viewbox at ({lat:.4f}, {lon:.4f}), {distance:.1f}km from city center")
+                    distance = haversine_distance(lat, lon, city_info["lat"], city_info["lon"])
+                    logger.info(f"[PLACE] Found {name} via viewbox at ({lat:.4f}, {lon:.4f}), {distance:.1f}km from city center")
                     return result
             
             await asyncio.sleep(0.15)
         except Exception as e:
-            print(f"[PLACE] Viewbox search error for {name}: {e}")
+            logger.info(f"[PLACE] Viewbox search error for {name}: {e}")
         
         return None
 
@@ -242,14 +245,14 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                         continue
                     
                     # Calculate distance from city center
-                    distance = self._haversine_distance(lat, lon, city_info["lat"], city_info["lon"])
+                    distance = haversine_distance(lat, lon, city_info["lat"], city_info["lon"])
                     
                     # STRICT: Must be within 25km of city center for walking/transit
                     # This prevents Versailles (20km from Paris) showing up in Brussels
                     max_distance = 25  # km
                     
                     if distance > max_distance:
-                        print(f"[PLACE] Rejecting {name} - {distance:.1f}km from {city} center (max: {max_distance}km)")
+                        logger.info(f"[PLACE] Rejecting {name} - {distance:.1f}km from {city} center (max: {max_distance}km)")
                         continue
                     
                     # Additional check: country must match
@@ -257,15 +260,15 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                     city_country = city_info.get("country_code", "").lower()
                     
                     if city_country and result_country and result_country != city_country:
-                        print(f"[PLACE] Rejecting {name} - wrong country ({result_country} vs {city_country})")
+                        logger.info(f"[PLACE] Rejecting {name} - wrong country ({result_country} vs {city_country})")
                         continue
                     
-                    print(f"[PLACE] Found {name} at ({lat:.4f}, {lon:.4f}), {distance:.1f}km from city center")
+                    logger.info(f"[PLACE] Found {name} at ({lat:.4f}, {lon:.4f}), {distance:.1f}km from city center")
                     return result
                 
                 await asyncio.sleep(0.15)
             except Exception as e:
-                print(f"[PLACE] Distance check error for {name}: {e}")
+                logger.info(f"[PLACE] Distance check error for {name}: {e}")
         
         return None
 
@@ -290,15 +293,12 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                 if city.lower() in display_name:
                     return result
                 else:
-                    print(f"[PLACE] Rejecting {name} - city name not in result: {display_name[:100]}")
+                    logger.info(f"[PLACE] Rejecting {name} - city name not in result: {display_name[:100]}")
         except Exception as e:
-            print(f"[PLACE] Simple geocode error: {e}")
+            logger.info(f"[PLACE] Simple geocode error: {e}")
         
         return None
 
-    def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate distance between two points in kilometers."""
-        return haversine_distance(lat1, lon1, lat2, lon2)
 
     async def lookup_landmarks(
         self, suggestions: list[LandmarkSuggestion], city: str
@@ -313,7 +313,7 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
         
         Target: Return 8-10 valid POIs for a good walking tour.
         """
-        print(f"[PLACE] Looking up {len(suggestions)} landmarks in {city}")
+        logger.info(f"[PLACE] Looking up {len(suggestions)} landmarks in {city}")
         pois = []
         seen_names = set()
         seen_coords = set()  # Avoid duplicate locations
@@ -328,7 +328,7 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                     continue
 
                 try:
-                    print(f"[PLACE] ({i+1}/{min(len(suggestions), 15)}) Geocoding: {suggestion.name}")
+                    logger.info(f"[PLACE] ({i+1}/{min(len(suggestions), 15)}) Geocoding: {suggestion.name}")
                     # Try multiple geocoding strategies
                     result = await self._geocode_place(client, suggestion.name, city)
                     
@@ -386,10 +386,10 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                     await asyncio.sleep(0.2)
 
                 except Exception as e:
-                    print(f"[PLACE] Lookup error for {suggestion.name}: {e}")
+                    logger.info(f"[PLACE] Lookup error for {suggestion.name}: {e}")
                     continue
 
-        print(f"[PLACE] Found {len(pois)} valid POIs")
+        logger.info(f"[PLACE] Found {len(pois)} valid POIs")
         return pois
 
     async def search_places(self, query: StructuredQuery) -> list[POI]:
@@ -433,7 +433,7 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                 await asyncio.sleep(0.5)  # Rate limit
 
             except Exception as e:
-                print(f"Nominatim search error: {e}")
+                logger.error(f"Nominatim search error: {e}")
                 continue
 
         return pois[:15]

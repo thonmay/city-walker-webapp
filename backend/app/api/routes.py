@@ -15,6 +15,7 @@ from typing import Optional
 from uuid import uuid4
 from datetime import datetime
 from urllib.parse import quote_plus
+import logging
 import math
 
 import httpx
@@ -35,17 +36,55 @@ from app.models import (
     Route,
 )
 from app.services import (
-    GeminiReasoningService,
     GooglePlaceValidatorService,
     GoogleRouteOptimizerService,
     RedisCacheService,
     CacheService,
+    create_ai_service,
 )
 from app.services.osm import OSMOverpassService
 from app.services.wikipedia import WikipediaService
 from app.utils.geo import haversine_distance
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+# ─── In-Memory LRU Cache (process-level, instant) ───
+from app.utils.cache import LRUCache
+
+_discover_cache = LRUCache(max_size=100, ttl_seconds=86400)  # 24h TTL
+
+
+def _discover_cache_key(city: str, limit: int, interests: list[str] | None = None) -> str:
+    """Build a normalized cache key for discover responses."""
+    city_norm = city.strip().lower()
+    interest_str = ",".join(sorted(interests)) if interests else "default"
+    return f"discover:{city_norm}:{limit}:{interest_str}"
+
+
+def _food_cache_key(city: str, category: str, limit: int) -> str:
+    """Build a normalized cache key for food discover responses."""
+    return f"discover_food:{city.strip().lower()}:{category}:{limit}"
+
+
+async def _redis_get_discover(key: str) -> dict | None:
+    """Try to get a cached discover response from Redis."""
+    try:
+        cache = get_cache_service()
+        return await cache.get(key)
+    except Exception:
+        return None  # Redis down — no big deal, just skip cache
+
+
+async def _redis_set_discover(key: str, value: dict, ttl: int = 86400) -> None:
+    """Cache a discover response in Redis (fire-and-forget)."""
+    try:
+        cache = get_cache_service()
+        await cache.set(key, value, ttl_seconds=ttl)
+    except Exception:
+        pass  # Redis down — no big deal
 
 
 def get_num_days(time_constraint: TimeConstraint | None) -> int:
@@ -414,7 +453,7 @@ async def geocode_address(address: str, city: str) -> POI | None:
             for coro in asyncio.as_completed(tasks):
                 result = await coro
                 if result:
-                    print(f"[GEOCODE] Found via {result['source']}: {result['lat']}, {result['lng']}")
+                    logger.info(f"[GEOCODE] Found via {result['source']}: {result['lat']}, {result['lng']}")
                     return POI(
                         place_id="starting_location",
                         name=address,
@@ -533,8 +572,10 @@ class PlaceDetailsResponse(BaseModel):
     error: Optional[AppError] = None
 
 
+from app.services.ai_reasoning import AIReasoningService
+
 # Service instances
-_ai_service: GeminiReasoningService | None = None
+_ai_service: AIReasoningService | None = None
 _osm_service: OSMOverpassService | None = None
 _wikipedia_service: WikipediaService | None = None
 _route_service: GoogleRouteOptimizerService | None = None
@@ -543,10 +584,10 @@ _cache_service: RedisCacheService | None = None
 _place_service: GooglePlaceValidatorService | None = None
 
 
-def get_ai_service() -> GeminiReasoningService:
+def get_ai_service() -> AIReasoningService:
     global _ai_service
     if _ai_service is None:
-        _ai_service = GeminiReasoningService()
+        _ai_service = create_ai_service()
     return _ai_service
 
 
@@ -604,26 +645,26 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
     - Free URL construction with waypoints
     - Opens in Google Maps app or web
     """
-    print(f"[DEBUG] Request received: {request.location}")
+    logger.debug(f" Request received: {request.location}")
     warnings: list[Warning] = []
     starting_poi: POI | None = None
     
     try:
-        print("[DEBUG] Getting services...")
+        logger.debug(" Getting services...")
         ai_service = get_ai_service()
         osm_service = get_osm_service()
         wikipedia_service = get_wikipedia_service()
         place_service = get_place_service()
         route_service = get_route_service()
-        print("[DEBUG] Services ready")
+        logger.debug(" Services ready")
 
         # 1. Parse city name from user input
-        print("[DEBUG] Calling AI to interpret input...")
+        logger.debug(" Calling AI to interpret input...")
         query = await ai_service.interpret_user_input(
             request.location, request.interests
         )
         city = query.city
-        print(f"[DEBUG] City parsed: {city}")
+        logger.debug(f" City parsed: {city}")
 
         # 2. Handle starting location (coordinates take priority over address)
         if request.starting_coordinates:
@@ -631,14 +672,14 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
             lat = request.starting_coordinates.get("lat")
             lng = request.starting_coordinates.get("lng")
             if lat is not None and lng is not None:
-                print(f"[DEBUG] Using provided coordinates: {lat}, {lng}")
+                logger.debug(f" Using provided coordinates: {lat}, {lng}")
                 starting_poi = create_poi_from_coordinates(
                     lat, lng, 
                     request.starting_location or "My Location"
                 )
         elif request.starting_location and request.starting_location.strip():
             # Address string - needs geocoding
-            print("[DEBUG] Geocoding starting location...")
+            logger.debug(" Geocoding starting location...")
             starting_poi = await geocode_address(request.starting_location.strip(), city)
             if not starting_poi:
                 warnings.append(Warning(
@@ -649,13 +690,13 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
 
         # 3. Classify interests to determine data source
         use_ai, use_osm = classify_interests(request.interests)
-        print(f"[DEBUG] Use AI: {use_ai}, Use OSM: {use_osm}")
+        logger.debug(f" Use AI: {use_ai}, Use OSM: {use_osm}")
         
         all_pois: list[POI] = []
         
         # 4a. AI path: For landmarks, museums, churches, history
         if use_ai:
-            print("[DEBUG] Getting AI landmark suggestions...")
+            logger.debug(" Getting AI landmark suggestions...")
             # Filter to AI-appropriate interests
             ai_interests = None
             if request.interests:
@@ -670,16 +711,16 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
                 transport_mode=request.transport_mode.value,
                 time_constraint=request.time_available.value if request.time_available else None,
             )
-            print(f"[DEBUG] Got {len(suggestions)} suggestions from AI")
+            logger.debug(f" Got {len(suggestions)} suggestions from AI")
             if suggestions:
-                print("[DEBUG] Looking up landmarks via Nominatim...")
+                logger.debug(" Looking up landmarks via Nominatim...")
                 ai_pois = await place_service.lookup_landmarks(suggestions, city)
-                print(f"[DEBUG] Got {len(ai_pois)} POIs from Nominatim")
+                logger.debug(f" Got {len(ai_pois)} POIs from Nominatim")
                 all_pois.extend(ai_pois)
         
         # 4b. OSM path: For cafes, bars, clubs, nightlife
         if use_osm:
-            print("[DEBUG] Querying OSM for venues...")
+            logger.debug(" Querying OSM for venues...")
             # Filter to OSM-appropriate interests
             osm_interests = None
             if request.interests:
@@ -692,14 +733,14 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
                 interests=osm_interests,
                 limit=20
             )
-            print(f"[DEBUG] Got {len(osm_places)} places from OSM")
+            logger.debug(f" Got {len(osm_places)} places from OSM")
             
             if osm_places:
                 osm_pois = [osm_service.osm_place_to_poi(p, city) for p in osm_places]
                 all_pois.extend(osm_pois)
 
         # 5. Deduplicate by name (case-insensitive)
-        print(f"[DEBUG] Total POIs before dedup: {len(all_pois)}")
+        logger.debug(f" Total POIs before dedup: {len(all_pois)}")
         seen_names = set()
         pois = []
         for poi in all_pois:
@@ -707,7 +748,7 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
             if name_lower not in seen_names:
                 pois.append(poi)
                 seen_names.add(name_lower)
-        print(f"[DEBUG] POIs after dedup: {len(pois)}")
+        logger.debug(f" POIs after dedup: {len(pois)}")
 
         if not pois:
             return CreateItineraryResponse(
@@ -737,16 +778,16 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
         )
         
         if request.interests and len(pois) > max_pois:
-            print("[DEBUG] Ranking POIs by interest...")
+            logger.debug(" Ranking POIs by interest...")
             ranked_pois = await ai_service.rank_pois(pois, request.interests)
             ranked_pois.sort(key=lambda x: x.relevance_score, reverse=True)
             pois = [rp.poi for rp in ranked_pois[:max_pois]]
         else:
             pois = pois[:max_pois]
-        print(f"[DEBUG] Final POI count: {len(pois)}")
+        logger.debug(f" Final POI count: {len(pois)}")
 
         # 7. Enrich POIs with Wikipedia images (mainly for landmarks)
-        print("[DEBUG] Enriching with Wikipedia images...")
+        logger.debug(" Enriching with Wikipedia images...")
         async def enrich_with_image(poi):
             # Skip image enrichment for cafes/bars (they rarely have Wikipedia pages)
             if poi.types and poi.types[0] in ["cafe", "bar", "club", "restaurant"]:
@@ -763,7 +804,7 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
         # Enrich all POIs, not just first 8
         enriched_pois = await asyncio.gather(*[enrich_with_image(p) for p in pois])
         pois = list(enriched_pois)
-        print("[DEBUG] Wikipedia enrichment done")
+        logger.debug(" Wikipedia enrichment done")
 
         # 8. Check for partial data
         partial_pois = [poi.place_id for poi in pois if poi.opening_hours is None]
@@ -775,7 +816,7 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
             ))
 
         # 9. Create optimized route
-        print("[DEBUG] Creating optimized route...")
+        logger.debug(" Creating optimized route...")
         route_pois = pois  # Use all POIs now
         
         # Extract starting coordinates if we have a starting POI
@@ -826,14 +867,14 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
         # 12. Organize into day plans for multi-day trips
         day_plans = None
         if num_days > 1:
-            print(f"[DEBUG] Organizing {len(route.ordered_pois)} POIs into {num_days} days...")
+            logger.debug(f" Organizing {len(route.ordered_pois)} POIs into {num_days} days...")
             day_plans = organize_pois_into_days(
                 route.ordered_pois, 
                 num_days, 
                 request.transport_mode,
                 preserve_order=True
             )
-            print(f"[DEBUG] Created {len(day_plans)} day plans")
+            logger.debug(f" Created {len(day_plans)} day plans")
             
             # Create routes for each day - just get geometry, POIs already in good order
             for day in day_plans:
@@ -846,9 +887,9 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
                         )
                         day.route = day_route
                         day.total_walking_km = day_route.total_distance / 1000
-                        print(f"[DEBUG] Day {day.day_number} route: {day_route.total_distance}m, polyline: {len(day_route.polyline) if day_route.polyline else 0} chars")
+                        logger.debug(f" Day {day.day_number} route: {day_route.total_distance}m, polyline: {len(day_route.polyline) if day_route.polyline else 0} chars")
                     except Exception as e:
-                        print(f"[DEBUG] Failed to create route for day {day.day_number}: {e}")
+                        logger.debug(f" Failed to create route for day {day.day_number}: {e}")
 
         # 13. Build itinerary
         itinerary = Itinerary(
@@ -907,8 +948,8 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
         )
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        
+        logger.exception("Unhandled error")
         return CreateItineraryResponse(
             success=False,
             error=AppError(
@@ -1083,7 +1124,7 @@ async def batch_geocode_places(request: BatchGeocodeRequest) -> BatchGeocodeResp
                         "coordinates": {"lat": result["lat"], "lng": result["lng"]},
                     }
         except Exception as e:
-            print(f"[GEOCODE] Error geocoding '{name}': {e}")
+            logger.info(f"[GEOCODE] Error geocoding '{name}': {e}")
         
         return {**place, "coordinates": None}
     
@@ -1253,7 +1294,7 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
             }
             
         except Exception as e:
-            print(f"[LOOKUP] Error looking up '{name}': {e}")
+            logger.error(f"[LOOKUP] Error looking up '{name}': {e}")
             return None
     
     try:
@@ -1269,7 +1310,7 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
         )
         
     except Exception as e:
-        print(f"[LOOKUP] Error: {e}")
+        logger.error(f"[LOOKUP] Error: {e}")
         return LookupPOIsResponse(
             success=False,
             pois=[],
@@ -1303,24 +1344,37 @@ class DiscoverResponse(BaseModel):
 async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
     """Discover 15-20 interesting POIs in a city.
     
-    This is the main entry point for the map-first experience.
-    Returns POIs with:
-    - Coordinates (from Nominatim)
-    - Images (from Wikipedia/Wikimedia Commons)
-    - Opening hours (from OSM)
-    - Why visit descriptions (from AI)
+    Multi-layer caching:
+    1. In-memory LRU (instant, process-level) — hot cities
+    2. Redis (fast, cross-process) — warm cities
+    3. Full pipeline (AI + Nominatim + Wikipedia) — cold cities
     
-    Flow:
-    1. AI suggests 15-20 famous/interesting places
-    2. Geocode all places in parallel
-    3. Fetch images from Wikipedia/Commons in parallel
-    4. Return full POI objects ready for map display
+    Cache TTL: 24h. Landmarks don't change daily.
     """
     import asyncio
     import time as time_module
     
     total_start = time_module.time()
-    print(f"[DISCOVER] Starting discovery for {request.city}")
+    
+    # ─── Layer 1: In-memory LRU cache (instant) ───
+    cache_key = _discover_cache_key(request.city, request.limit, request.interests)
+    cached = _discover_cache.get(cache_key)
+    if cached:
+        elapsed = time_module.time() - total_start
+        logger.info(f"[DISCOVER] Cache HIT (memory) for {request.city} ({elapsed*1000:.0f}ms)")
+        return DiscoverResponse(**cached)
+    
+    # ─── Layer 2: Redis cache (fast) ───
+    redis_cached = await _redis_get_discover(cache_key)
+    if redis_cached:
+        # Promote to memory cache for next hit
+        _discover_cache.set(cache_key, redis_cached)
+        elapsed = time_module.time() - total_start
+        logger.info(f"[DISCOVER] Cache HIT (redis) for {request.city} ({elapsed*1000:.0f}ms)")
+        return DiscoverResponse(**redis_cached)
+    
+    # ─── Layer 3: Full discovery pipeline (cold) ───
+    logger.info(f"[DISCOVER] Cache MISS for {request.city} — running full pipeline")
     
     try:
         ai_service = get_ai_service()
@@ -1333,22 +1387,33 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             timeout=10.0,
             headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
         ) as client:
-            response = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={
-                    "q": request.city,
-                    "format": "json",
-                    "limit": 1,
-                    "featuretype": "city",
-                },
-            )
-            response.raise_for_status()
-            results = response.json()
-            if results:
-                city_center = {
-                    "lat": float(results[0]["lat"]),
-                    "lng": float(results[0]["lon"]),
-                }
+            # Retry city center geocoding (Nominatim can 429 if we've been busy)
+            for attempt in range(3):
+                try:
+                    response = await client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={
+                            "q": request.city,
+                            "format": "json",
+                            "limit": 1,
+                            "featuretype": "city",
+                        },
+                    )
+                    response.raise_for_status()
+                    results = response.json()
+                    if results:
+                        city_center = {
+                            "lat": float(results[0]["lat"]),
+                            "lng": float(results[0]["lon"]),
+                        }
+                    break
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429 and attempt < 2:
+                        wait = 2.0 * (attempt + 1)
+                        logger.info(f"[DISCOVER] Nominatim 429, retrying in {wait}s...")
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
         
         if not city_center:
             return DiscoverResponse(
@@ -1357,11 +1422,11 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             )
         
         geocode_elapsed = time_module.time() - geocode_start
-        print(f"[DISCOVER] City center: {city_center} ({geocode_elapsed:.1f}s)")
+        logger.info(f"[DISCOVER] City center: {city_center} ({geocode_elapsed:.1f}s)")
         
         # 2. Get AI suggestions for places
         ai_start = time_module.time()
-        print("[DISCOVER] Getting AI suggestions...")
+        logger.info("[DISCOVER] Getting AI suggestions...")
         suggestions = await ai_service.suggest_landmarks(
             request.city,
             request.interests,
@@ -1372,7 +1437,7 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
         # Limit to requested amount
         suggestions = suggestions[:request.limit]
         ai_elapsed = time_module.time() - ai_start
-        print(f"[DISCOVER] Got {len(suggestions)} suggestions from AI ({ai_elapsed:.1f}s)")
+        logger.info(f"[DISCOVER] Got {len(suggestions)} suggestions from AI ({ai_elapsed:.1f}s)")
         
         if not suggestions:
             return DiscoverResponse(
@@ -1455,15 +1520,24 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                         address = best_result.get("display_name", "")
                         extratags = best_result.get("extratags", {})
                         opening_hours_text = extratags.get("opening_hours")
-                        print(f"[DISCOVER] Geocoded {name}: {best_distance:.1f}km from center")
+                        logger.info(f"[DISCOVER] Geocoded {name}: {best_distance:.1f}km from center")
                     else:
-                        print(f"[DISCOVER] No results within {MAX_DISTANCE_KM}km for: {name}")
+                        logger.info(f"[DISCOVER] No results within {MAX_DISTANCE_KM}km for: {name}")
                     
                     if not coords:
                         return None
                     
-                    # Get multiple images (Wikipedia + Commons in parallel)
-                    images = await wikipedia_service.get_images_for_landmark(name, request.city, count=3)
+                    # Get images with a hard timeout — don't let image fetching block POI delivery
+                    images: list[str] = []
+                    try:
+                        images = await asyncio.wait_for(
+                            wikipedia_service.get_images_for_landmark(name, request.city, count=3),
+                            timeout=10.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info(f"[DISCOVER] Image fetch timed out for {name}")
+                    except Exception:
+                        pass  # Images are best-effort
                     
                     # Build POI
                     maps_url = f"https://www.google.com/maps/search/?api=1&query={quote_plus(name + ', ' + request.city)}"
@@ -1492,36 +1566,45 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                     }
                     
                 except Exception as e:
-                    print(f"[DISCOVER] Error enriching {name}: {e}")
+                    logger.info(f"[DISCOVER] Error enriching {name}: {e}")
                     return None
             
             # Run enrichments with limited concurrency to avoid rate limiting
-            # Nominatim allows ~1 req/sec, so we limit to 5 concurrent requests
-            # (slightly aggressive but usually works)
-            print("[DISCOVER] Enriching places in parallel...")
-            semaphore = asyncio.Semaphore(5)
+            # Nominatim allows ~1 req/sec — use semaphore(3) + delay
+            logger.info("[DISCOVER] Enriching places in parallel...")
+            semaphore = asyncio.Semaphore(3)
             
             async def enrich_with_limit(suggestion):
                 async with semaphore:
-                    return await enrich_place(suggestion)
+                    result = await enrich_place(suggestion)
+                    await asyncio.sleep(0.35)  # Respect Nominatim rate limit
+                    return result
             
             enriched = await asyncio.gather(*[enrich_with_limit(s) for s in suggestions])
             
             # Filter out failures
             pois = [p for p in enriched if p is not None]
             elapsed = time.time() - start_enrich
-            print(f"[DISCOVER] Successfully enriched {len(pois)} POIs in {elapsed:.1f}s")
+            logger.info(f"[DISCOVER] Successfully enriched {len(pois)} POIs in {elapsed:.1f}s")
         
-        return DiscoverResponse(
-            success=True,
-            city=request.city,
-            city_center=city_center,
-            pois=pois,
-        )
+        # ─── Cache the result (both layers) ───
+        total_elapsed = time_module.time() - total_start
+        logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — caching for next time")
+        
+        response_dict = {
+            "success": True,
+            "city": request.city,
+            "city_center": city_center,
+            "pois": pois,
+        }
+        _discover_cache.set(cache_key, response_dict)
+        await _redis_set_discover(cache_key, response_dict, ttl=86400)
+        
+        return DiscoverResponse(**response_dict)
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        
+        logger.exception("Unhandled error")
         return DiscoverResponse(
             success=False,
             city=request.city,
@@ -1556,7 +1639,7 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
     This endpoint takes the POIs the user has selected and creates
     an optimized walking route through them.
     """
-    print(f"[ROUTE] Creating route from {len(request.pois)} selected POIs")
+    logger.info(f"[ROUTE] Creating route from {len(request.pois)} selected POIs")
     
     if not request.pois:
         return CreateRouteFromSelectionResponse(
@@ -1626,7 +1709,7 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
                 starting_coords = (starting_poi.coordinates.lat, starting_poi.coordinates.lng)
         
         # Create optimized route
-        print("[ROUTE] Creating optimized route...")
+        logger.info("[ROUTE] Creating optimized route...")
         route = await route_service.create_optimized_route(
             pois=pois,
             mode=request.transport_mode,
@@ -1640,7 +1723,7 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
         num_days = request.num_days
         
         if num_days > 1 and len(route.ordered_pois) > 2:
-            print(f"[ROUTE] Organizing {len(route.ordered_pois)} POIs into {num_days} days")
+            logger.info(f"[ROUTE] Organizing {len(route.ordered_pois)} POIs into {num_days} days")
             # Use the optimized order for day splitting
             day_plans = organize_pois_into_days(route.ordered_pois, num_days, request.transport_mode, preserve_order=True)
             
@@ -1648,7 +1731,7 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
             for day in day_plans:
                 if len(day.pois) > 1:
                     try:
-                        print(f"[ROUTE] Creating route for day {day.day_number} with {len(day.pois)} POIs...")
+                        logger.info(f"[ROUTE] Creating route for day {day.day_number} with {len(day.pois)} POIs...")
                         # For day routes, we just need the polyline - POIs are already in good order
                         # Skip the expensive distance matrix + optimization, just get geometry
                         day_route = await route_service.get_route_geometry(
@@ -1657,15 +1740,15 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
                         )
                         day.route = day_route
                         day.total_walking_km = day_route.total_distance / 1000
-                        print(f"[ROUTE] Day {day.day_number} route: {day_route.total_distance}m, polyline length: {len(day_route.polyline) if day_route.polyline else 0}")
+                        logger.info(f"[ROUTE] Day {day.day_number} route: {day_route.total_distance}m, polyline length: {len(day_route.polyline) if day_route.polyline else 0}")
                     except Exception as e:
-                        print(f"[ROUTE] Failed to create route for day {day.day_number}: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.info(f"[ROUTE] Failed to create route for day {day.day_number}: {e}")
+                        
+                        logger.exception("Unhandled error")
                 else:
-                    print(f"[ROUTE] Day {day.day_number} has only {len(day.pois)} POI(s), skipping route creation")
+                    logger.info(f"[ROUTE] Day {day.day_number} has only {len(day.pois)} POI(s), skipping route creation")
             
-            print(f"[ROUTE] Created {len(day_plans)} day plans")
+            logger.info(f"[ROUTE] Created {len(day_plans)} day plans")
         
         # Build Google Maps URL
         google_maps_url = build_google_maps_url(
@@ -1711,7 +1794,7 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
             total_days=num_days,
         )
         
-        print(f"[ROUTE] Route created successfully: {distance_km:.1f}km, {len(route.ordered_pois)} stops, {num_days} day(s)")
+        logger.info(f"[ROUTE] Route created successfully: {distance_km:.1f}km, {len(route.ordered_pois)} stops, {num_days} day(s)")
         
         return CreateRouteFromSelectionResponse(
             success=True,
@@ -1719,8 +1802,8 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
         )
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        
+        logger.exception("Unhandled error")
         return CreateRouteFromSelectionResponse(
             success=False,
             error=str(e),
@@ -1752,18 +1835,30 @@ class DiscoverFoodResponse(BaseModel):
 async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResponse:
     """Discover famous/iconic cafes, restaurants, bars, or parks in a city.
     
-    SIMPLIFIED APPROACH (avoids Overpass rate limits):
-    1. Get AI suggestions for famous places
-    2. Geocode via Nominatim (no rate limits like Overpass)
-    3. Return places that geocode successfully
-    
-    This is faster and more reliable than Overpass validation.
+    Multi-layer caching (same as /discover):
+    1. In-memory LRU → 2. Redis → 3. Full pipeline
     """
     import asyncio
     import time as time_module
     
-    print(f"[FOOD] Discovering famous {request.category} in {request.city}")
     start_time = time_module.time()
+    
+    # ─── Cache check ───
+    cache_key = _food_cache_key(request.city, request.category, request.limit)
+    cached = _discover_cache.get(cache_key)
+    if cached:
+        elapsed = time_module.time() - start_time
+        logger.info(f"[FOOD] Cache HIT (memory) for {request.city}/{request.category} ({elapsed*1000:.0f}ms)")
+        return DiscoverFoodResponse(**cached)
+    
+    redis_cached = await _redis_get_discover(cache_key)
+    if redis_cached:
+        _discover_cache.set(cache_key, redis_cached)
+        elapsed = time_module.time() - start_time
+        logger.info(f"[FOOD] Cache HIT (redis) for {request.city}/{request.category} ({elapsed*1000:.0f}ms)")
+        return DiscoverFoodResponse(**redis_cached)
+    
+    logger.info(f"[FOOD] Cache MISS — discovering famous {request.category} in {request.city}")
     
     try:
         ai_service = get_ai_service()
@@ -1780,7 +1875,7 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
         category = category_map.get(category, "cafes")
         
         # Get AI suggestions for famous places
-        print(f"[FOOD] Getting AI suggestions for famous {category}...")
+        logger.info(f"[FOOD] Getting AI suggestions for famous {category}...")
         ai_suggestions = await ai_service.suggest_food_and_drinks(
             city=request.city,
             category=category,
@@ -1797,7 +1892,7 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
                 validation_stats={"method": "ai_empty", "count": 0, "elapsed_seconds": round(elapsed, 1)},
             )
         
-        print(f"[FOOD] Got {len(ai_suggestions)} AI suggestions, geocoding via Nominatim...")
+        logger.info(f"[FOOD] Got {len(ai_suggestions)} AI suggestions, geocoding via Nominatim...")
         
         # Geocode AI suggestions via Nominatim (fast, no rate limits)
         async def geocode_suggestion(suggestion) -> dict | None:
@@ -1821,7 +1916,7 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
                     results = response.json()
                     
                     if not results:
-                        print(f"[FOOD] Not found: {suggestion.name}")
+                        logger.info(f"[FOOD] Not found: {suggestion.name}")
                         return None
                     
                     result = results[0]
@@ -1829,7 +1924,7 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
                     lng = float(result["lon"])
                     address = result.get("display_name", request.city)
                     
-                    print(f"[FOOD] Found: {suggestion.name} at ({lat:.4f}, {lng:.4f})")
+                    logger.info(f"[FOOD] Found: {suggestion.name} at ({lat:.4f}, {lng:.4f})")
                     
                     return {
                         "place_id": f"food_{suggestion.name.lower().replace(' ', '_')}_{hash(suggestion.name) % 10000}",
@@ -1847,7 +1942,7 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
                         "specialty": suggestion.specialty,
                     }
             except Exception as e:
-                print(f"[FOOD] Error geocoding {suggestion.name}: {e}")
+                logger.info(f"[FOOD] Error geocoding {suggestion.name}: {e}")
                 return None
         
         # Geocode with limited concurrency (Nominatim allows ~1 req/sec)
@@ -1862,11 +1957,11 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
         geocoded = await asyncio.gather(*[geocode_with_limit(s) for s in ai_suggestions])
         pois = [p for p in geocoded if p is not None][:request.limit]
         
-        print(f"[FOOD] Successfully geocoded {len(pois)} places")
+        logger.info(f"[FOOD] Successfully geocoded {len(pois)} places")
         
         # Enrich with Wikipedia images (fast, parallel)
         if pois:
-            print(f"[FOOD] Enriching with Wikipedia images...")
+            logger.info(f"[FOOD] Enriching with Wikipedia images...")
             
             async def enrich_with_image(poi_dict):
                 try:
@@ -1885,19 +1980,23 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
             pois = list(enriched)
         
         elapsed = time_module.time() - start_time
-        print(f"[FOOD] Completed in {elapsed:.1f}s: {len(pois)} POIs")
+        logger.info(f"[FOOD] Completed in {elapsed:.1f}s: {len(pois)} POIs — caching")
         
-        return DiscoverFoodResponse(
-            success=True,
-            city=request.city,
-            category=category,
-            pois=pois,
-            validation_stats={"method": "ai_nominatim", "count": len(pois), "elapsed_seconds": round(elapsed, 1)},
-        )
+        response_dict = {
+            "success": True,
+            "city": request.city,
+            "category": category,
+            "pois": pois,
+            "validation_stats": {"method": "ai_nominatim", "count": len(pois), "elapsed_seconds": round(elapsed, 1)},
+        }
+        _discover_cache.set(cache_key, response_dict)
+        await _redis_set_discover(cache_key, response_dict, ttl=86400)
+        
+        return DiscoverFoodResponse(**response_dict)
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        
+        logger.exception("Unhandled error")
         return DiscoverFoodResponse(
             success=False,
             city=request.city,

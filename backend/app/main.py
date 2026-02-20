@@ -4,6 +4,7 @@ Main entry point for the backend API server.
 Requirements: 7.2, 7.3
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,6 +14,13 @@ from pydantic import ValidationError
 
 from app.api import router
 from app.models import AppError, ErrorCode
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 @asynccontextmanager

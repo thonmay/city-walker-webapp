@@ -2,14 +2,13 @@
 
 This module contains all service layer components including:
 - Cache service for Redis-based caching
-- AI reasoning service for natural language processing (Gemini)
+- AI reasoning service (Groq primary, Gemini fallback)
 - Place validator service for geocoding and validation
 - Route optimizer service for route calculation
-- Foursquare service for POI enrichment (ratings, photos, hours)
 """
 
 from .cache import CacheService, RedisCacheService
-from .ai_reasoning import AIReasoningService, GeminiReasoningService, RankedPOI, LandmarkSuggestion
+from .ai_reasoning import AIReasoningService, GeminiReasoningService, GroqReasoningService, RankedPOI, LandmarkSuggestion, create_ai_service
 from .place_validator import (
     PlaceValidatorService,
     OpenStreetMapValidatorService,
@@ -23,7 +22,6 @@ from .route_optimizer import (
     GoogleRouteOptimizerService,
     DistanceMatrix,
 )
-from .foursquare import FoursquareService
 
 __all__ = [
     # Cache service
@@ -32,8 +30,10 @@ __all__ = [
     # AI reasoning service
     "AIReasoningService",
     "GeminiReasoningService",
+    "GroqReasoningService",
     "RankedPOI",
     "LandmarkSuggestion",
+    "create_ai_service",
     # Place validator service
     "PlaceValidatorService",
     "OpenStreetMapValidatorService",
@@ -45,6 +45,4 @@ __all__ = [
     "OSRMRouteOptimizerService",
     "GoogleRouteOptimizerService",
     "DistanceMatrix",
-    # Foursquare service
-    "FoursquareService",
 ]

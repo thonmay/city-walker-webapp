@@ -1,16 +1,34 @@
 'use client';
 
 /**
- * Map Component - Leaflet map with animated POI pins and route visualization
- * 
- * OPTIMIZED VERSION:
- * - Animations only play on FIRST appearance (tracked via ref)
- * - Selection changes update marker styles without re-animating
- * - Click zooms IN to selected POI (not out)
- * - Smooth, performant updates
+ * Map Component — MapLibre GL via @vis.gl/react-maplibre
+ *
+ * Two rendering tiers:
+ * 1. MapTiler (key present): streets-v2-dark + 3D terrain elevation + sky/fog
+ *    atmosphere + globe projection at low zoom. Cinematic.
+ * 2. Fallback (no key / quota hit): Carto dark-matter, flat 2D. Still looks good.
+ *
+ * Features:
+ * - Discovery mode: photo/emoji circle markers with pop-in animation
+ * - Route mode: numbered markers + glowing polyline
+ * - Fit bounds on new search (not on food append)
+ * - Fly to selected POI
+ * - 3D perspective (45° pitch)
+ * - Runtime fallback: if MapTiler style fails to load, swaps to Carto
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import {
+  Map as MapGL,
+  Marker,
+  Source,
+  Layer,
+  NavigationControl,
+  TerrainControl,
+  useMap,
+} from '@vis.gl/react-maplibre';
+import type { LngLatBoundsLike, SkySpecification, TerrainSpecification } from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import type { POI, Coordinates, Itinerary } from '@/types';
 
 interface MapProps {
@@ -23,141 +41,51 @@ interface MapProps {
   selectedDay?: number;
 }
 
-// Default center (Paris)
-const DEFAULT_CENTER: [number, number] = [48.8566, 2.3522];
+const DEFAULT_CENTER: [number, number] = [2.3522, 48.8566]; // [lng, lat]
 
-// Inject animation styles once
-let stylesInjected = false;
-function injectAnimationStyles() {
-  if (stylesInjected || typeof document === 'undefined') return;
-  stylesInjected = true;
+/* ─── Map Style Configuration ─── */
+const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_KEY;
 
-  const style = document.createElement('style');
-  style.id = 'citywalker-map-animations';
-  style.textContent = `
-    @keyframes poiPopIn {
-      0% { transform: scale(0); opacity: 0; }
-      70% { transform: scale(1.15); }
-      100% { transform: scale(1); opacity: 1; }
-    }
-    
-    @keyframes routeMarkerPop {
-      0% { transform: scale(0); opacity: 0; }
-      70% { transform: scale(1.1); }
-      100% { transform: scale(1); opacity: 1; }
-    }
-    
-    .poi-animate-in {
-      animation: poiPopIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-    }
-    
-    .route-animate-in {
-      animation: routeMarkerPop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-    }
-    
-    .poi-marker-wrap {
-      transition: transform 0.15s ease;
-    }
-    
-    .poi-marker-wrap:hover {
-      transform: scale(1.12) !important;
-    }
-    
-    .leaflet-tooltip.poi-tooltip {
-      background: rgba(24, 24, 27, 0.9);
-      border: none;
-      border-radius: 8px;
-      color: white;
-      font-weight: 500;
-      padding: 6px 12px;
-      font-size: 13px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-    }
-    .leaflet-tooltip.poi-tooltip::before {
-      border-top-color: rgba(24, 24, 27, 0.9);
-    }
-  `;
-  document.head.appendChild(style);
-}
+// Premium: MapTiler streets-v2-dark with 3D buildings baked in
+const MAPTILER_STYLE = MAPTILER_KEY
+  ? `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${MAPTILER_KEY}`
+  : null;
 
-// Get emoji for place type
-function getPlaceEmoji(type: string): string {
-  const emojis: Record<string, string> = {
-    museum: '🏛️', cafe: '☕', landmark: '🏰', church: '⛪', park: '🌳',
-    restaurant: '🍽️', bar: '🍸', viewpoint: '👀', market: '🛒', gallery: '🎨',
-    palace: '🏰', monument: '🗿', square: '🏛️', garden: '🌷', bridge: '🌉',
-    tower: '🗼', club: '🎵',
-  };
-  return emojis[type] || '📍';
-}
+// Free fallback: Carto dark-matter (no key needed, unlimited)
+const FALLBACK_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
-// Create POI marker HTML (static - no animation class if already shown)
-function createPOIMarkerHTML(
-  poi: POI,
-  isSelected: boolean,
-  isAccepted: boolean,
-  photoUrl: string | null,
-  shouldAnimate: boolean,
-  animationDelay: number
-): string {
-  const size = isSelected ? 62 : 52;
-  const borderColor = isAccepted ? '#22c55e' : (isSelected ? '#f59e0b' : 'white');
-  const borderWidth = isAccepted || isSelected ? 4 : 3;
-  const shadow = isAccepted
-    ? '0 4px 16px rgba(34, 197, 94, 0.4)'
-    : (isSelected ? '0 4px 20px rgba(245, 158, 11, 0.5)' : '0 4px 14px rgba(0,0,0,0.2)');
+// MapTiler terrain tiles for 3D elevation (included in free tier)
+const TERRAIN_SOURCE_URL = MAPTILER_KEY
+  ? `https://api.maptiler.com/tiles/terrain-rgb-v2/tiles.json?key=${MAPTILER_KEY}`
+  : null;
 
-  const emoji = getPlaceEmoji(poi.types?.[0] || 'landmark');
-  const animClass = shouldAnimate ? 'poi-animate-in' : '';
-  const animStyle = shouldAnimate ? `animation-delay:${animationDelay}ms;` : '';
+// Whether we have MapTiler features available
+const HAS_MAPTILER = Boolean(MAPTILER_KEY);
 
-  const innerContent = photoUrl
-    ? `<img src="${photoUrl}" style="width:100%;height:100%;object-fit:cover;" />`
-    : `<span style="font-size:${isSelected ? 26 : 22}px;">${emoji}</span>`;
+/**
+ * Sky specification for MapTiler — dark cinematic atmosphere.
+ * Subtle fog at the horizon gives depth without obscuring the map.
+ */
+const MAPTILER_SKY: SkySpecification = {
+  'sky-color': '#0b0d1a',
+  'sky-horizon-blend': 0.4,
+  'horizon-color': '#1a1a3e',
+  'horizon-fog-blend': 0.7,
+  'fog-color': '#0d0f1e',
+  'fog-ground-blend': 0.15,
+  'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 12, 0.3, 16, 0],
+};
 
-  const checkmark = isAccepted ? `
-    <div style="position:absolute;bottom:-3px;right:-3px;width:22px;height:22px;background:#22c55e;border-radius:50%;border:2px solid white;display:flex;align-items:center;justify-content:center;">
-      <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-        <path d="M2 6L5 9L10 3" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
-      </svg>
-    </div>` : '';
+/**
+ * Terrain specification — subtle exaggeration so cities look flat
+ * but hills/mountains near the city are visible.
+ */
+const MAPTILER_TERRAIN: TerrainSpecification = {
+  source: 'maptiler-terrain',
+  exaggeration: 1.2,
+};
 
-  return `
-    <div class="poi-marker-wrap ${animClass}" style="${animStyle}">
-      <div style="width:${size}px;height:${size}px;border-radius:50%;overflow:hidden;background:white;border:${borderWidth}px solid ${borderColor};box-shadow:${shadow};cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;">
-        ${innerContent}
-        ${checkmark}
-      </div>
-    </div>
-  `;
-}
-
-// Create route marker HTML
-function createRouteMarkerHTML(
-  number: number,
-  isSelected: boolean,
-  shouldAnimate: boolean,
-  animationDelay: number
-): string {
-  const size = isSelected ? 50 : 42;
-  const bgColor = isSelected ? '#f59e0b' : 'white';
-  const textColor = isSelected ? 'white' : '#18181b';
-  const borderColor = isSelected ? '#f59e0b' : '#d4d4d8';
-  const shadow = isSelected ? '0 4px 20px rgba(245, 158, 11, 0.5)' : '0 3px 12px rgba(0,0,0,0.15)';
-
-  const animClass = shouldAnimate ? 'route-animate-in' : '';
-  const animStyle = shouldAnimate ? `animation-delay:${animationDelay}ms;` : '';
-
-  return `
-    <div class="${animClass}" style="${animStyle}">
-      <div style="width:${size}px;height:${size}px;border-radius:50%;background:${bgColor};border:3px solid ${borderColor};box-shadow:${shadow};cursor:pointer;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${isSelected ? 18 : 15}px;color:${textColor};font-family:system-ui,sans-serif;">
-        ${number}
-      </div>
-    </div>
-  `;
-}
-
-// Decode polyline
+/* ─── Polyline decoder (Google encoded format → [lng, lat][]) ─── */
 function decodePolyline(encoded: string): [number, number][] {
   if (!encoded) return [];
   const points: [number, number][] = [];
@@ -169,325 +97,466 @@ function decodePolyline(encoded: string): [number, number][] {
     shift = 0; result = 0;
     do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
     lng += result & 1 ? ~(result >> 1) : result >> 1;
-    points.push([lat / 1e5, lng / 1e5]);
+    points.push([lng / 1e5, lat / 1e5]);
   }
   return points;
 }
 
-// Ramer-Douglas-Peucker polyline simplification for cleaner walking routes
-// This removes unnecessary detail from street-level routing for a Google Maps-like appearance
-function simplifyPolyline(points: [number, number][], tolerance: number = 0.00015): [number, number][] {
-  if (points.length <= 2) return points;
+/* ─── Emoji map for POI types ─── */
+const PLACE_EMOJIS: Record<string, string> = {
+  museum: '🏛️', cafe: '☕', landmark: '🏰', church: '⛪', park: '🌳',
+  restaurant: '🍽️', bar: '🍸', viewpoint: '👀', market: '🛒', gallery: '🎨',
+  palace: '🏰', monument: '🗿', square: '🏛️', garden: '🌷', bridge: '🌉',
+  tower: '🗼', club: '🎵',
+};
 
-  // Find point with max distance from line between first and last
-  let maxDist = 0;
-  let maxIndex = 0;
-  const [startLat, startLng] = points[0];
-  const [endLat, endLng] = points[points.length - 1];
+/* ─── POI Marker (discovery mode) ─── */
+function POIMarker({
+  poi, isSelected, isAccepted, shouldAnimate, animDelay, onClick,
+}: {
+  poi: POI; isSelected: boolean; isAccepted: boolean;
+  shouldAnimate: boolean; animDelay: number; onClick: () => void;
+}) {
+  const size = isSelected ? 56 : 46;
+  const emoji = PLACE_EMOJIS[poi.types?.[0] || 'landmark'] || '📍';
+  const photoUrl = poi.photos?.[0] || null;
 
-  for (let i = 1; i < points.length - 1; i++) {
-    const [lat, lng] = points[i];
-    // Perpendicular distance from point to line (simplified for small distances)
-    const dist = Math.abs(
-      (endLng - startLng) * (startLat - lat) - (startLng - lng) * (endLat - startLat)
-    ) / Math.sqrt((endLng - startLng) ** 2 + (endLat - startLat) ** 2);
+  const borderColor = isAccepted
+    ? 'var(--trail-green)'
+    : isSelected
+      ? 'var(--compass-gold)'
+      : 'white';
 
-    if (dist > maxDist) {
-      maxDist = dist;
-      maxIndex = i;
-    }
-  }
+  const shadow = isAccepted
+    ? '0 2px 12px rgba(74, 124, 89, 0.45), 0 0 0 3px rgba(74, 124, 89, 0.15)'
+    : isSelected
+      ? '0 2px 16px rgba(212, 168, 83, 0.5), 0 0 0 3px rgba(212, 168, 83, 0.15)'
+      : '0 2px 8px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.04)';
 
-  // If max distance > tolerance, recursively simplify
-  if (maxDist > tolerance) {
-    const left = simplifyPolyline(points.slice(0, maxIndex + 1), tolerance);
-    const right = simplifyPolyline(points.slice(maxIndex), tolerance);
-    return [...left.slice(0, -1), ...right];
-  }
+  return (
+    <Marker
+      longitude={poi.coordinates.lng}
+      latitude={poi.coordinates.lat}
+      anchor="center"
+      onClick={(e) => { e.originalEvent.stopPropagation(); onClick(); }}
+      style={{ zIndex: isSelected ? 100 : isAccepted ? 50 : 1 }}
+    >
+      <div
+        className="poi-marker-wrap"
+        style={{
+          animation: shouldAnimate ? `poiPopIn 0.4s cubic-bezier(0.34,1.56,0.64,1) ${animDelay}ms both` : undefined,
+          cursor: 'pointer',
+        }}
+        title={poi.name}
+      >
+        {/* Outer ring for selected/accepted */}
+        <div style={{
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          overflow: 'hidden',
+          background: 'white',
+          border: `${isAccepted || isSelected ? 3 : 2.5}px solid ${borderColor}`,
+          boxShadow: shadow,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          position: 'relative',
+          transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+        }}>
+          {photoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={photoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ) : (
+            <span style={{ fontSize: isSelected ? 24 : 20, lineHeight: 1 }}>{emoji}</span>
+          )}
+        </div>
 
-  // Otherwise just return endpoints
-  return [points[0], points[points.length - 1]];
+        {/* Accepted badge */}
+        {isAccepted && (
+          <div style={{
+            position: 'absolute', bottom: -2, right: -2,
+            width: 20, height: 20,
+            background: 'var(--trail-green)',
+            borderRadius: '50%', border: '2px solid white',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+          }}>
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+              <path d="M2 6L5 9L10 3" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+            </svg>
+          </div>
+        )}
+
+        {/* Name label on selected */}
+        {isSelected && (
+          <div style={{
+            position: 'absolute',
+            top: size + 6,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            whiteSpace: 'nowrap',
+            background: 'rgba(255, 255, 255, 0.92)',
+            backdropFilter: 'blur(8px)',
+            color: 'var(--ink)',
+            padding: '5px 12px',
+            borderRadius: 8,
+            fontSize: 12,
+            fontFamily: 'var(--font-body)',
+            fontWeight: 600,
+            boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+            pointerEvents: 'none',
+            animation: 'fadeIn 0.2s ease',
+          }}>
+            {poi.name}
+          </div>
+        )}
+      </div>
+    </Marker>
+  );
 }
 
-export function Map({
-  itinerary,
-  selectedPoi,
-  onPinClick,
-  suggestedPois,
-  acceptedPois = new Set(),
-  center,
-  selectedDay = 1
-}: MapProps) {
-  const mapRef = useRef<HTMLDivElement>(null);
-  // Leaflet types are dynamic-import only, using any for refs
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mapInstanceRef = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const markersRef = useRef<Record<string, any>>({});
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const polylinesRef = useRef<any[]>([]);
-  const animatedPoisRef = useRef<Set<string>>(new Set()); // Track which POIs have animated
-  const lastPoisRef = useRef<string>(''); // Track POI list to detect new POIs
-  const [isClient, setIsClient] = useState(false);
+/* ─── Route Marker (itinerary mode) ─── */
+function RouteMarker({
+  poi, index, isSelected, onClick,
+}: {
+  poi: POI; index: number; isSelected: boolean; onClick: () => void;
+}) {
+  const size = isSelected ? 42 : 34;
+  return (
+    <Marker
+      longitude={poi.coordinates.lng}
+      latitude={poi.coordinates.lat}
+      anchor="center"
+      onClick={(e) => { e.originalEvent.stopPropagation(); onClick(); }}
+      style={{ zIndex: isSelected ? 100 : 10 }}
+    >
+      <div style={{ position: 'relative' }}>
+        <div style={{
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          background: isSelected
+            ? 'linear-gradient(135deg, var(--compass-gold), var(--compass-gold-dark))'
+            : 'var(--ink)',
+          color: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontFamily: 'var(--font-body)',
+          fontWeight: 700,
+          fontSize: isSelected ? 16 : 13,
+          border: `2.5px solid ${isSelected ? 'var(--compass-gold-light)' : 'rgba(255,255,255,0.9)'}`,
+          boxShadow: isSelected
+            ? '0 3px 16px rgba(212, 168, 83, 0.5), 0 0 0 3px rgba(212, 168, 83, 0.12)'
+            : '0 2px 8px rgba(0,0,0,0.25)',
+          cursor: 'pointer',
+          transition: 'all 0.2s ease',
+          animation: `routeMarkerPop 0.3s cubic-bezier(0.34,1.56,0.64,1) ${index * 60}ms both`,
+        }}>
+          {index + 1}
+        </div>
 
-  useEffect(() => {
-    setIsClient(true);
-    injectAnimationStyles();
-  }, []);
-
-  // Get stable POI key for comparison
-  const getPoisKey = useCallback((pois: POI[] | undefined) => {
-    if (!pois) return '';
-    return pois.map(p => p.place_id).sort().join(',');
-  }, []);
-
-  // Initialize map
-  useEffect(() => {
-    if (!isClient || !mapRef.current || mapInstanceRef.current) return;
-
-    const initMap = async () => {
-      const L = (await import('leaflet')).default;
-
-      mapInstanceRef.current = L.map(mapRef.current!, {
-        center: DEFAULT_CENTER,
-        zoom: 13,
-        zoomControl: false,
-      });
-
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; OpenStreetMap &copy; CARTO',
-        subdomains: 'abcd',
-      }).addTo(mapInstanceRef.current);
-
-      L.control.zoom({ position: 'bottomright' }).addTo(mapInstanceRef.current);
-    };
-
-    initMap();
-  }, [isClient]);
-
-  // Update markers when POIs change
-  useEffect(() => {
-    if (!isClient || !mapInstanceRef.current) return;
-
-    const updateMarkers = async () => {
-      const L = (await import('leaflet')).default;
-      const map = mapInstanceRef.current;
-
-      // Clear polylines
-      polylinesRef.current.forEach(line => line.remove());
-      polylinesRef.current = [];
-
-      // ITINERARY MODE
-      if (itinerary) {
-        // Clear discovery markers
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        Object.values(markersRef.current).forEach((m: any) => m.remove());
-        markersRef.current = {};
-
-        const pois = itinerary.route?.ordered_pois || itinerary.pois || [];
-        // Include selectedDay in key so day switches trigger full redraw
-        const itineraryKey = `day${selectedDay}_${pois.map(p => p.place_id).join(',')}`;
-        const isNewItinerary = lastPoisRef.current !== itineraryKey;
-        lastPoisRef.current = itineraryKey;
-
-        // Debug: Log route data
-        if (process.env.NODE_ENV === 'development') {
-          console.log('[Map] Itinerary route:', {
-            hasRoute: !!itinerary.route,
-            hasPolyline: !!itinerary.route?.polyline,
-            polylineLength: itinerary.route?.polyline?.length || 0,
-            poisCount: pois.length,
-            transportMode: itinerary.route?.transport_mode,
-            isNewItinerary,
-            selectedDay,
-          });
-        }
-
-        // Draw route line
-        const polyline = itinerary.route?.polyline;
-        if (polyline && polyline.length > 0) {
-          try {
-            let points = decodePolyline(polyline);
-            
-            // Simplify walking routes for cleaner appearance
-            if (points.length > 20 && itinerary.route?.transport_mode === 'walking') {
-              const simplified = simplifyPolyline(points, 0.0003);
-              if (simplified.length >= Math.max(3, points.length * 0.1)) {
-                points = simplified;
-              }
-            }
-            
-            if (points.length > 0) {
-              const shadow = L.polyline(points, { color: '#000', weight: 9, opacity: 0.12, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-              polylinesRef.current.push(shadow);
-              const main = L.polyline(points, { color: '#f59e0b', weight: 5, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map);
-              polylinesRef.current.push(main);
-            }
-          } catch (e) {
-            console.error('[Map] Polyline decode error:', e);
-          }
-        } else if (pois.length > 1) {
-          // Fallback: draw straight lines between POIs when no polyline available
-          const fallbackPoints = pois.map(p => [p.coordinates.lat, p.coordinates.lng] as [number, number]);
-          const shadow = L.polyline(fallbackPoints, { color: '#000', weight: 9, opacity: 0.08, lineCap: 'round', lineJoin: 'round', dashArray: '8, 12' }).addTo(map);
-          polylinesRef.current.push(shadow);
-          const main = L.polyline(fallbackPoints, { color: '#f59e0b', weight: 4, opacity: 0.7, lineCap: 'round', lineJoin: 'round', dashArray: '8, 12' }).addTo(map);
-          polylinesRef.current.push(main);
-        }
-
-        // Add/update route markers
-        pois.forEach((poi, index) => {
-          const isSelected = selectedPoi?.place_id === poi.place_id;
-          const shouldAnimate = isNewItinerary && !animatedPoisRef.current.has(poi.place_id);
-          const animDelay = shouldAnimate ? index * 60 : 0;
-
-          if (shouldAnimate) animatedPoisRef.current.add(poi.place_id);
-
-          const existingMarker = markersRef.current[poi.place_id];
-          const icon = L.divIcon({
-            className: '',
-            html: createRouteMarkerHTML(index + 1, isSelected, shouldAnimate, animDelay),
-            iconSize: [50, 50],
-            iconAnchor: [25, 25],
-          });
-
-          if (existingMarker) {
-            existingMarker.setIcon(icon);
-            existingMarker.setZIndexOffset(isSelected ? 1000 : index);
-          } else {
-            const marker = L.marker([poi.coordinates.lat, poi.coordinates.lng], {
-              icon,
-              zIndexOffset: isSelected ? 1000 : index
-            });
-            marker.on('click', () => onPinClick?.(poi));
-            marker.addTo(map);
-            markersRef.current[poi.place_id] = marker;
-          }
-        });
-
-        // Fit bounds on new itinerary with smooth animation
-        if (isNewItinerary && pois.length > 0) {
-          const bounds = L.latLngBounds(pois.map(p => [p.coordinates.lat, p.coordinates.lng] as [number, number]));
-          map.flyToBounds(bounds, {
-            padding: [60, 60],
-            maxZoom: 15,
-            duration: 1.2,
-            easeLinearity: 0.25  // Smooth ease from Vite version
-          });
-        }
-        return;
-      }
-
-      // DISCOVERY MODE
-      if (suggestedPois && suggestedPois.length > 0) {
-        const currentKey = getPoisKey(suggestedPois);
-        const isNewBatch = lastPoisRef.current !== currentKey;
-
-        if (isNewBatch) {
-          // New batch - clear old markers and reset animation tracking
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          Object.values(markersRef.current).forEach((m: any) => m.remove());
-          markersRef.current = {};
-          animatedPoisRef.current.clear();
-          lastPoisRef.current = currentKey;
-        }
-
-        suggestedPois.forEach((poi, index) => {
-          if (!poi.coordinates) return;
-
-          const isSelected = selectedPoi?.place_id === poi.place_id;
-          const isAccepted = acceptedPois.has(poi.place_id);
-          const photoUrl = poi.photos?.[0] || null;
-
-          // Only animate if this POI hasn't been shown yet
-          const shouldAnimate = !animatedPoisRef.current.has(poi.place_id);
-          const animDelay = shouldAnimate ? index * 80 : 0;
-
-          if (shouldAnimate) animatedPoisRef.current.add(poi.place_id);
-
-          const icon = L.divIcon({
-            className: '',
-            html: createPOIMarkerHTML(poi, isSelected, isAccepted, photoUrl, shouldAnimate, animDelay),
-            iconSize: [62, 62],
-            iconAnchor: [31, 31],
-          });
-
-          const existingMarker = markersRef.current[poi.place_id];
-
-          if (existingMarker) {
-            // Update existing marker (no re-animation)
-            existingMarker.setIcon(icon);
-            existingMarker.setZIndexOffset(isSelected ? 2000 : (isAccepted ? 1000 : 0));
-          } else {
-            // New marker with animation
-            const marker = L.marker([poi.coordinates.lat, poi.coordinates.lng], {
-              icon,
-              zIndexOffset: isSelected ? 2000 : (isAccepted ? 1000 : 0),
-            });
-            marker.bindTooltip(poi.name, { direction: 'top', offset: [0, -32], className: 'poi-tooltip' });
-            marker.on('click', () => onPinClick?.(poi));
-            marker.addTo(map);
-            markersRef.current[poi.place_id] = marker;
-          }
-        });
-
-        // Only fit bounds on new batch, not on selection changes
-        if (isNewBatch) {
-          const points = suggestedPois.filter(p => p.coordinates).map(p => [p.coordinates.lat, p.coordinates.lng] as [number, number]);
-          if (points.length > 0) {
-            const bounds = L.latLngBounds(points);
-            // Delay slightly to let pop-in animations start
-            setTimeout(() => {
-              map.flyToBounds(bounds, {
-                padding: [80, 80],
-                maxZoom: 14,
-                duration: 1.5,
-                easeLinearity: 0.25  // Smooth ease from Vite version
-              });
-            }, 150);
-          }
-        }
-        return;
-      }
-
-      // No POIs - clear markers
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      Object.values(markersRef.current).forEach((m: any) => m.remove());
-      markersRef.current = {};
-
-      if (center) {
-        map.flyTo([center.lat, center.lng], 13, { duration: 0.8 });
-      }
-    };
-
-    updateMarkers();
-  }, [isClient, itinerary, selectedPoi, suggestedPois, acceptedPois, center, onPinClick, getPoisKey, selectedDay]);
-
-  // Zoom IN to selected POI (separate effect to avoid marker rebuilding)
-  useEffect(() => {
-    if (!isClient || !mapInstanceRef.current || !selectedPoi?.coordinates) return;
-
-    // Zoom IN to selected POI - at least zoom 16, never zoom out
-    const currentZoom = mapInstanceRef.current.getZoom();
-    const targetZoom = Math.max(currentZoom, 16);
-
-    mapInstanceRef.current.flyTo(
-      [selectedPoi.coordinates.lat, selectedPoi.coordinates.lng],
-      targetZoom,
-      {
-        duration: 0.8,  // Quick but smooth
-        easeLinearity: 0.5  // Faster ease for selection (from Vite version)
-      }
-    );
-  }, [isClient, selectedPoi?.place_id]); // Only trigger on place_id change
-
-  if (!isClient) {
-    return (
-      <div className="w-full h-full bg-zinc-100 flex items-center justify-center">
-        <div className="text-zinc-400">Loading map...</div>
+        {/* Name tooltip on selected */}
+        {isSelected && (
+          <div style={{
+            position: 'absolute',
+            top: size + 6,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            whiteSpace: 'nowrap',
+            background: 'rgba(255, 255, 255, 0.92)',
+            backdropFilter: 'blur(8px)',
+            color: 'var(--ink)',
+            padding: '5px 12px',
+            borderRadius: 8,
+            fontSize: 12,
+            fontFamily: 'var(--font-body)',
+            fontWeight: 600,
+            boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+            pointerEvents: 'none',
+            animation: 'fadeIn 0.2s ease',
+          }}>
+            {poi.name}
+          </div>
+        )}
       </div>
-    );
-  }
+    </Marker>
+  );
+}
 
-  return <div ref={mapRef} className="w-full h-full" />;
+/* ─── Route Line Styles (bold 3D-visible glow: renders above buildings) ─── */
+// Outermost halo — wide soft glow so the route is visible behind 3D buildings
+const routeLineHalo = {
+  id: 'route-line-halo',
+  type: 'line' as const,
+  paint: {
+    'line-color': '#d4a853',
+    'line-width': 24,
+    'line-opacity': 0.15,
+    'line-blur': 16,
+  },
+  layout: {
+    'line-join': 'round' as const,
+    'line-cap': 'round' as const,
+  },
+};
+
+const routeLineGlow = {
+  id: 'route-line-glow',
+  type: 'line' as const,
+  paint: {
+    'line-color': '#e8c97a',
+    'line-width': 14,
+    'line-opacity': 0.4,
+    'line-blur': 6,
+  },
+  layout: {
+    'line-join': 'round' as const,
+    'line-cap': 'round' as const,
+  },
+};
+
+const routeLineMain = {
+  id: 'route-line-main',
+  type: 'line' as const,
+  paint: {
+    'line-color': '#f0d48a',
+    'line-width': 5,
+    'line-opacity': 0.95,
+  },
+  layout: {
+    'line-join': 'round' as const,
+    'line-cap': 'round' as const,
+  },
+};
+
+const routeLineDash = {
+  id: 'route-line-dash',
+  type: 'line' as const,
+  paint: {
+    'line-color': '#ffffff',
+    'line-width': 1.5,
+    'line-opacity': 0.4,
+    'line-dasharray': [2, 4],
+  },
+  layout: {
+    'line-join': 'round' as const,
+    'line-cap': 'round' as const,
+  },
+};
+
+/* ─── Fit Bounds Controller ─── */
+function FitBoundsController({
+  pois, selectedPoi, center,
+}: {
+  pois: POI[]; selectedPoi?: POI | null; center?: Coordinates;
+}) {
+  const { current: map } = useMap();
+  const prevPoisRef = useRef<string[]>([]);
+  const hasFittedRef = useRef(false);
+
+  // Fly to selected POI
+  useEffect(() => {
+    if (!map || !selectedPoi) return;
+    map.flyTo({
+      center: [selectedPoi.coordinates.lng, selectedPoi.coordinates.lat],
+      zoom: Math.max(map.getZoom(), 15),
+      pitch: 50,
+      duration: 800,
+    });
+  }, [map, selectedPoi]);
+
+  // Fit bounds on new search (skip appends like food POIs)
+  useEffect(() => {
+    if (!map || pois.length === 0) return;
+
+    const currentIds = pois.map(p => p.place_id);
+    const prevIds = prevPoisRef.current;
+
+    // Detect append: all previous IDs still present in current list (Set for O(1) lookups — 7.11)
+    const isAppend =
+      prevIds.length > 0 &&
+      currentIds.length > prevIds.length &&
+      (() => { const currentSet = new Set(currentIds); return prevIds.every(id => currentSet.has(id)); })();
+
+    prevPoisRef.current = currentIds;
+    if (isAppend) return; // Food POIs appended — don't re-zoom
+
+    const lngs = pois.map(p => p.coordinates.lng);
+    const lats = pois.map(p => p.coordinates.lat);
+    const bounds: LngLatBoundsLike = [
+      [Math.min(...lngs) - 0.01, Math.min(...lats) - 0.01],
+      [Math.max(...lngs) + 0.01, Math.max(...lats) + 0.01],
+    ];
+
+    map.fitBounds(bounds, { padding: 80, duration: 1200, maxZoom: 16, pitch: 45 });
+    hasFittedRef.current = true;
+  }, [map, pois]);
+
+  // Fly to center when no POIs (initial load or city change)
+  useEffect(() => {
+    if (!map || !center || pois.length > 0) return;
+    if (hasFittedRef.current) return;
+    map.flyTo({ center: [center.lng, center.lat], zoom: 13, pitch: 45, duration: 1000 });
+  }, [map, center, pois.length]);
+
+  return null;
+}
+
+/* ─── Main Map Component ─── */
+export function Map({
+  itinerary, selectedPoi, onPinClick,
+  suggestedPois = [], acceptedPois = new Set(),
+  center, selectedDay,
+}: MapProps) {
+  const [animatedIds, setAnimatedIds] = useState<Set<string>>(() => new Set());
+  const prevSuggestedRef = useRef<string[]>([]);
+
+  // Runtime fallback: if MapTiler style fails (quota, network), swap to Carto
+  const [mapStyle, setMapStyle] = useState(MAPTILER_STYLE ?? FALLBACK_STYLE);
+  const [useTerrain, setUseTerrain] = useState(HAS_MAPTILER);
+  const hasFallenBackRef = useRef(false);
+
+  const handleStyleError = useCallback(() => {
+    if (!hasFallenBackRef.current) {
+      hasFallenBackRef.current = true;
+      console.warn('[Map] MapTiler style failed — falling back to Carto dark-matter');
+      setMapStyle(FALLBACK_STYLE);
+      setUseTerrain(false);
+    }
+  }, []);
+
+  // Track newly added POIs for pop-in animation
+  useEffect(() => {
+    const currentIds = suggestedPois.map(p => p.place_id);
+    const prevSet = new Set(prevSuggestedRef.current); // Set for O(1) lookups — 7.11
+    const newIds = currentIds.filter(id => !prevSet.has(id));
+
+    // Always update ref to avoid stale state (5.3 narrow deps)
+    prevSuggestedRef.current = currentIds;
+
+    if (newIds.length > 0) {
+      setAnimatedIds(new Set(newIds));
+      const timer = setTimeout(() => setAnimatedIds(new Set()), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [suggestedPois]);
+
+  // Build route GeoJSON from encoded polyline
+  const routeGeoJSON = useMemo(() => {
+    const polyline = itinerary?.route?.polyline;
+    if (!polyline) return null;
+    const coords = decodePolyline(polyline);
+    if (coords.length < 2) return null;
+    return {
+      type: 'Feature' as const, properties: {},
+      geometry: { type: 'LineString' as const, coordinates: coords },
+    };
+  }, [itinerary?.route?.polyline]);
+
+  // Fallback straight lines when no encoded polyline
+  const fallbackGeoJSON = useMemo(() => {
+    if (routeGeoJSON) return null;
+    const ordered = itinerary?.route?.ordered_pois;
+    if (!ordered || ordered.length < 2) return null;
+    return {
+      type: 'Feature' as const, properties: {},
+      geometry: {
+        type: 'LineString' as const,
+        coordinates: ordered.map(p => [p.coordinates.lng, p.coordinates.lat]),
+      },
+    };
+  }, [routeGeoJSON, itinerary?.route?.ordered_pois]);
+
+  const lineData = routeGeoJSON ?? fallbackGeoJSON;
+
+  const allPois = useMemo(() => {
+    if (itinerary?.route?.ordered_pois) return itinerary.route.ordered_pois;
+    return suggestedPois;
+  }, [itinerary?.route?.ordered_pois, suggestedPois]);
+
+  const isDiscoveryMode = !itinerary && suggestedPois.length > 0;
+  const isRouteMode = Boolean(itinerary?.route?.ordered_pois);
+  // Stable key: only remount on day change, NOT on POI count change.
+  const boundsKey = `bounds-${selectedDay ?? 0}`;
+
+  return (
+    <MapGL
+      initialViewState={{
+        longitude: center?.lng ?? DEFAULT_CENTER[0],
+        latitude: center?.lat ?? DEFAULT_CENTER[1],
+        zoom: 13,
+        pitch: 45,
+        bearing: -15,
+      }}
+      style={{ width: '100%', height: '100%' }}
+      mapStyle={mapStyle}
+      attributionControl={{}}
+      maxPitch={60}
+      // 3D terrain + sky atmosphere (MapTiler only)
+      terrain={useTerrain ? MAPTILER_TERRAIN : undefined}
+      sky={useTerrain ? MAPTILER_SKY : undefined}
+      // Runtime error fallback
+      onError={handleStyleError}
+    >
+      <NavigationControl position="bottom-right" showCompass />
+
+      {/* Terrain toggle button (MapTiler only) */}
+      {useTerrain && <TerrainControl position="bottom-right" source="maptiler-terrain" exaggeration={1.2} />}
+
+      {/* MapTiler terrain DEM source — raster elevation tiles for 3D */}
+      {useTerrain && TERRAIN_SOURCE_URL && (
+        <Source
+          id="maptiler-terrain"
+          type="raster-dem"
+          url={TERRAIN_SOURCE_URL}
+          tileSize={256}
+        />
+      )}
+
+      <FitBoundsController
+        key={boundsKey}
+        pois={allPois}
+        selectedPoi={selectedPoi}
+        center={center}
+      />
+
+      {/* Discovery markers */}
+      {isDiscoveryMode &&
+        suggestedPois.map((poi, i) => (
+          <POIMarker
+            key={poi.place_id}
+            poi={poi}
+            isSelected={selectedPoi?.place_id === poi.place_id}
+            isAccepted={acceptedPois.has(poi.place_id)}
+            shouldAnimate={animatedIds.has(poi.place_id)}
+            animDelay={i * 50}
+            onClick={() => onPinClick?.(poi)}
+          />
+        ))}
+
+      {/* Route markers */}
+      {isRouteMode &&
+        itinerary!.route.ordered_pois.map((poi, i) => (
+          <RouteMarker
+            key={poi.place_id}
+            poi={poi}
+            index={i}
+            isSelected={selectedPoi?.place_id === poi.place_id}
+            onClick={() => onPinClick?.(poi)}
+          />
+        ))}
+
+      {/* Route polyline — 4-layer glow effect (visible above 3D buildings) */}
+      {lineData && (
+        <Source id="route" type="geojson" data={lineData}>
+          <Layer {...routeLineHalo} />
+          <Layer {...routeLineGlow} />
+          <Layer {...routeLineMain} />
+          <Layer {...routeLineDash} />
+        </Source>
+      )}
+    </MapGL>
+  );
 }

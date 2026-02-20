@@ -1,21 +1,19 @@
-"""AI Reasoning service module.
-
-Provides AI-powered interpretation of user input, POI ranking,
-clustering, and route explanation using Google Gemini.
-
-Requirements: 1.1, 3.1, 3.2, 3.3, 3.4, 3.6, 3.7
-"""
+"""AI Reasoning — Groq (primary) + Gemini (fallback)."""
 
 from .service import (
     AIReasoningService,
     GeminiReasoningService,
+    GroqReasoningService,
     RankedPOI,
     LandmarkSuggestion,
+    create_ai_service,
 )
 
 __all__ = [
     "AIReasoningService",
     "GeminiReasoningService",
+    "GroqReasoningService",
     "RankedPOI",
     "LandmarkSuggestion",
+    "create_ai_service",
 ]

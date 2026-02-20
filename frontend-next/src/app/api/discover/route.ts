@@ -7,42 +7,33 @@
 
 import { google } from '@ai-sdk/google';
 import { streamText } from 'ai';
+import { z } from 'zod';
 
 // Allow streaming up to 60 seconds
 export const maxDuration = 60;
 
-// Request body schema
-interface DiscoverRequest {
-    city: string;
-    interests?: string[];
-    transportMode?: 'walking' | 'driving' | 'transit';
-    tripDays?: number; // 1-7 days
-}
-
-// Number of POIs based on duration - increased for better variety
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function getPoiCount(duration?: string): number {
-    const counts: Record<string, number> = {
-        '6h': 10,
-        'day': 18,
-        '2days': 22,
-        '3days': 25,
-        '5days': 30,
-    };
-    return counts[duration || 'day'] || 18;
-}
+/* Input validation (fullstack-developer: validate all inputs) */
+const discoverRequestSchema = z.object({
+    city: z.string().min(1, 'City is required').max(100),
+    interests: z.array(z.string()).optional(),
+    transportMode: z.enum(['walking', 'driving', 'transit']).optional(),
+    tripDays: z.number().int().min(1).max(7).optional().default(1),
+    limit: z.number().int().min(1).max(50).optional(),
+});
 
 export async function POST(req: Request) {
     try {
-        const body: DiscoverRequest = await req.json();
-        const { city, interests, transportMode, tripDays = 1 } = body;
+        const body = await req.json();
+        const parsed = discoverRequestSchema.safeParse(body);
 
-        if (!city || city.trim().length === 0) {
+        if (!parsed.success) {
             return Response.json(
-                { error: 'City is required' },
+                { error: 'Invalid input', details: parsed.error.issues },
                 { status: 400 }
             );
         }
+
+        const { city, interests, transportMode, tripDays } = parsed.data;
 
         // Calculate POI count based on trip days - no limit for multi-day trips
         const poisPerDay = 10;

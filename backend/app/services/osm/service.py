@@ -13,11 +13,14 @@ The AI is used ONLY for ranking/personalization, not for generating places.
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import quote_plus
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from app.models import Coordinates, OpeningHours, POI
 
@@ -218,7 +221,7 @@ class OSMOverpassService:
                 return None
             
         except Exception as e:
-            print(f"Nominatim bbox error for {city}: {e}")
+            logger.error(f"Nominatim bbox error for {city}: {e}")
             return None
 
     def _build_overpass_query(
@@ -270,7 +273,7 @@ out center {limit};
         # 1. Get city bounding box
         bbox = await self.get_city_bbox(city)
         if not bbox:
-            print(f"Could not find bounding box for {city}")
+            logger.warning(f"Could not find bounding box for {city}")
             return []
         
         # 2. Map interests to OSM tags
@@ -348,7 +351,7 @@ out center {limit};
             return places[:limit]
             
         except Exception as e:
-            print(f"Overpass query error: {e}")
+            logger.error(f"Overpass query error: {e}")
             return []
 
     def osm_place_to_poi(self, place: OSMPlace, city: str) -> POI:
@@ -458,7 +461,7 @@ out center {limit};
         # Get city bounding box first
         bbox = await self.get_city_bbox(city)
         if not bbox:
-            print(f"[OSM-VALIDATE] Could not get bbox for {city}")
+            logger.info(f"[OSM-VALIDATE] Could not get bbox for {city}")
             return None
         
         south, west, north, east = bbox
@@ -512,7 +515,7 @@ out center 3;
             elements = data.get("elements", [])
             
             if not elements:
-                print(f"[OSM-VALIDATE] Not found in OSM: {name} ({category}) in {city}")
+                logger.info(f"[OSM-VALIDATE] Not found in OSM: {name} ({category}) in {city}")
                 return None
             
             # Find best match (prefer exact name match)
@@ -569,13 +572,13 @@ out center 3;
                 )
                 place.calculate_notability()
                 
-                print(f"[OSM-VALIDATE] Found: {place.name} at ({lat:.4f}, {lon:.4f})")
+                logger.info(f"[OSM-VALIDATE] Found: {place.name} at ({lat:.4f}, {lon:.4f})")
                 return place
             
             return None
             
         except Exception as e:
-            print(f"[OSM-VALIDATE] Error validating {name}: {e}")
+            logger.info(f"[OSM-VALIDATE] Error validating {name}: {e}")
             return None
 
     async def get_famous_places(
@@ -668,9 +671,9 @@ out center {limit * 2};
             # Sort by notability
             places.sort(key=lambda p: p.notability, reverse=True)
             
-            print(f"[OSM] Found {len(places)} notable {category}s in {city}")
+            logger.info(f"[OSM] Found {len(places)} notable {category}s in {city}")
             return places[:limit]
             
         except Exception as e:
-            print(f"[OSM] Error getting famous {category}s: {e}")
+            logger.info(f"[OSM] Error getting famous {category}s: {e}")
             return []

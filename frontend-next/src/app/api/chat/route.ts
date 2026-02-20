@@ -4,10 +4,17 @@
  */
 
 import { google } from '@ai-sdk/google';
-import { streamText, convertToModelMessages, generateId } from 'ai';
+import { streamText, convertToModelMessages, generateId, type UIMessage } from 'ai';
+import { z } from 'zod';
 
 // Allow streaming responses up to 60 seconds
 export const maxDuration = 60;
+
+/* Input validation (fullstack-developer: validate all inputs) */
+const chatRequestSchema = z.object({
+  // UIMessage is a complex AI SDK type — we validate structure minimally, SDK handles the rest
+  messages: z.array(z.object({ role: z.string(), parts: z.array(z.unknown()) }).passthrough()).min(1, 'At least one message is required'),
+});
 
 const SYSTEM_PROMPT = `You are CityWalker, an AI travel assistant that helps users plan walking tours and city explorations. You're friendly, knowledgeable about cities worldwide, and excellent at creating personalized itineraries.
 
@@ -55,10 +62,20 @@ Start by greeting the user and asking where they'd like to explore!`;
 
 export async function POST(req: Request) {
   try {
-    const { messages } = await req.json();
+    const body = await req.json();
+    const parsed = chatRequestSchema.safeParse(body);
+
+    if (!parsed.success) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid request', details: parsed.error.issues }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { messages } = parsed.data;
 
     // Convert UI messages to model messages format (async in AI SDK 5.0)
-    const modelMessages = await convertToModelMessages(messages);
+    const modelMessages = await convertToModelMessages(messages as unknown as UIMessage[]);
 
     const result = streamText({
       model: google('gemma-3-4b-it'),

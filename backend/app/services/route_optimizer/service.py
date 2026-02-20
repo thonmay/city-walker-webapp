@@ -6,6 +6,7 @@ and NetworkX for graph-based optimization.
 Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -16,6 +17,8 @@ from numpy.typing import NDArray
 
 from app.models import POI, Route, RouteLeg, TransportMode, TimeConstraint
 from app.utils.geo import haversine_distance
+
+logger = logging.getLogger(__name__)
 
 # Time constraint mappings in seconds
 TIME_LIMITS = {
@@ -122,7 +125,7 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
             for i in range(n):
                 for j in range(n):
                     if i != j:
-                        dist = self._haversine(
+                        dist = haversine_distance(
                             pois[i].coordinates.lat, pois[i].coordinates.lng,
                             pois[j].coordinates.lat, pois[j].coordinates.lng
                         )
@@ -133,9 +136,6 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
 
         return DistanceMatrix(pois=pois, distances=distances, durations=durations)
 
-    def _haversine(self, lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-        """Calculate distance in km using Haversine formula."""
-        return haversine_distance(lat1, lng1, lat2, lng2)
 
     def optimize_order(self, matrix: DistanceMatrix, start_index: int | None = None) -> list[int]:
         """Find optimal visit order using nearest neighbor + 2-opt + best start.
@@ -261,7 +261,7 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
         """Get route for a single batch of POIs."""
         coords = ";".join(f"{poi.coordinates.lng},{poi.coordinates.lat}" for poi in ordered_pois)
         url = f"{self.OSRM_URL}/route/v1/{profile}/{coords}"
-        print(f"[ROUTE] OSRM request: {len(ordered_pois)} POIs, profile={profile}")
+        logger.info(f"[ROUTE] OSRM request: {len(ordered_pois)} POIs, profile={profile}")
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -274,13 +274,13 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
                 data = response.json()
 
                 if data.get("code") != "Ok" or not data.get("routes"):
-                    print(f"[ROUTE] OSRM returned no route: {data.get('code')}")
+                    logger.info(f"[ROUTE] OSRM returned no route: {data.get('code')}")
                     raise ValueError("No route found")
 
                 route_data = data["routes"][0]
                 total_distance = int(route_data.get("distance", 0))
                 polyline = route_data.get("geometry", "")
-                print(f"[ROUTE] OSRM success: distance={total_distance}m, polyline_length={len(polyline)}")
+                logger.info(f"[ROUTE] OSRM success: distance={total_distance}m, polyline_length={len(polyline)}")
                 
                 speed_kmh = {
                     TransportMode.WALKING: 5.0,
@@ -313,7 +313,7 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
                     legs=legs,
                 )
         except Exception as e:
-            print(f"[ROUTE] OSRM error: {e}, using fallback")
+            logger.info(f"[ROUTE] OSRM error: {e}, using fallback")
             return self._create_fallback_route(ordered_pois, mode)
 
     async def _get_batched_route(self, ordered_pois: list[POI], mode: TransportMode, profile: str, batch_size: int) -> Route:
@@ -370,7 +370,7 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
                                     polyline="",
                                 ))
             except Exception as e:
-                print(f"[ROUTE] Batch {i}-{end} error: {e}")
+                logger.info(f"[ROUTE] Batch {i}-{end} error: {e}")
             
             # Move to next batch, overlapping by 1
             i = end - 1 if end < len(ordered_pois) else end
@@ -477,7 +477,7 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
     def _create_fallback_route(self, ordered_pois: list[POI], mode: TransportMode) -> Route:
         """Create a route without OSRM geometry (fallback)."""
         total_dist = sum(
-            self._haversine(
+            haversine_distance(
                 ordered_pois[i].coordinates.lat, ordered_pois[i].coordinates.lng,
                 ordered_pois[i+1].coordinates.lat, ordered_pois[i+1].coordinates.lng
             ) * 1000
@@ -523,49 +523,49 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
         # For day routes (no time_constraint), use all POIs provided
         if time_constraint:
             max_pois = self.MAX_POIS_BY_TIME.get(time_constraint.value, self.DEFAULT_MAX_POIS)
-            print(f"[ROUTE] Starting optimization with {len(pois)} POIs (max: {max_pois})")
+            logger.info(f"[ROUTE] Starting optimization with {len(pois)} POIs (max: {max_pois})")
             if len(pois) > max_pois:
                 pois = pois[:max_pois]
         else:
-            print(f"[ROUTE] Starting optimization with {len(pois)} POIs (no limit)")
+            logger.info(f"[ROUTE] Starting optimization with {len(pois)} POIs (no limit)")
 
-        print("[ROUTE] Building distance matrix...")
+        logger.info("[ROUTE] Building distance matrix...")
         matrix = await self.build_distance_matrix(pois, mode)
-        print("[ROUTE] Distance matrix built")
+        logger.info("[ROUTE] Distance matrix built")
         
         # Skip optimization if POIs are already in optimal order
         if skip_optimization:
-            print(f"[ROUTE] Skipping optimization (already ordered)")
+            logger.info(f"[ROUTE] Skipping optimization (already ordered)")
             ordered_pois = pois
         else:
             # If we have a starting point, find the nearest POI to start from
             first_poi_index = None
             if starting_point:
                 start_lat, start_lng = starting_point
-                print(f"[ROUTE] Finding nearest POI to starting point ({start_lat:.4f}, {start_lng:.4f})...")
+                logger.info(f"[ROUTE] Finding nearest POI to starting point ({start_lat:.4f}, {start_lng:.4f})...")
                 
                 # Calculate distance from starting point to each POI
                 distances_from_start = []
                 for i, poi in enumerate(pois):
-                    dist = self._haversine(start_lat, start_lng, 
+                    dist = haversine_distance(start_lat, start_lng, 
                                            poi.coordinates.lat, poi.coordinates.lng)
                     distances_from_start.append((i, dist))
                 
                 # Sort by distance and pick the nearest
                 distances_from_start.sort(key=lambda x: x[1])
                 first_poi_index = distances_from_start[0][0]
-                print(f"[ROUTE] Nearest POI is #{first_poi_index + 1}: {pois[first_poi_index].name}")
+                logger.info(f"[ROUTE] Nearest POI is #{first_poi_index + 1}: {pois[first_poi_index].name}")
             
-            print("[ROUTE] Optimizing order...")
+            logger.info("[ROUTE] Optimizing order...")
             order = self.optimize_order(matrix, first_poi_index)
-            print(f"[ROUTE] Order optimized: {order}")
+            logger.info(f"[ROUTE] Order optimized: {order}")
             ordered_pois = [pois[i] for i in order]
 
             if time_constraint:
                 time_limit = TIME_LIMITS[time_constraint]
                 ordered_pois = self._trim_to_time_limit(ordered_pois, matrix, order, time_limit)
 
-        print("[ROUTE] Getting route geometry...")
+        logger.info("[ROUTE] Getting route geometry...")
         
         # Build the full route including starting point
         if starting_point:
@@ -580,7 +580,7 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
             result.starting_point = Coordinates(lat=starting_point[0], lng=starting_point[1])
             result.is_round_trip = is_round_trip
         
-        print("[ROUTE] Route geometry obtained")
+        logger.info("[ROUTE] Route geometry obtained")
         return result
 
     async def _get_route_with_starting_point(
@@ -642,18 +642,18 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
                     legs=[],  # Simplified - legs would need more work
                 )
         except Exception as e:
-            print(f"[ROUTE] OSRM error: {e}, using fallback")
+            logger.info(f"[ROUTE] OSRM error: {e}, using fallback")
             # Fallback calculation
-            total_dist = self._haversine(start_lat, start_lng,
+            total_dist = haversine_distance(start_lat, start_lng,
                                          ordered_pois[0].coordinates.lat, 
                                          ordered_pois[0].coordinates.lng) * 1000
             for i in range(len(ordered_pois) - 1):
-                total_dist += self._haversine(
+                total_dist += haversine_distance(
                     ordered_pois[i].coordinates.lat, ordered_pois[i].coordinates.lng,
                     ordered_pois[i+1].coordinates.lat, ordered_pois[i+1].coordinates.lng
                 ) * 1000
             if is_round_trip:
-                total_dist += self._haversine(
+                total_dist += haversine_distance(
                     ordered_pois[-1].coordinates.lat, ordered_pois[-1].coordinates.lng,
                     start_lat, start_lng
                 ) * 1000
