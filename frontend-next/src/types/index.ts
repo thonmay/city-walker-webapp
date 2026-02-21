@@ -36,6 +36,8 @@ export interface POI {
   visit_duration_minutes?: number;
   why_visit?: string;
   specialty?: string;  // For cafes/restaurants: signature dish or drink
+  admission?: string;  // e.g. "free", "~15 EUR", "~25 USD"
+  admission_url?: string;  // Link to official ticket/booking page
 }
 
 export interface RouteLeg {

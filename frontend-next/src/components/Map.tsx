@@ -3,21 +3,19 @@
 /**
  * Map Component — MapLibre GL via @vis.gl/react-maplibre
  *
+ * Performance-optimized:
+ * - POIMarker / RouteMarker wrapped in React.memo
+ * - Static styles hoisted outside render
+ * - Map export wrapped in React.memo with shallow prop comparator
+ * - Lazy-loaded marker images
+ * - Reduced route layers (3 instead of 4)
+ *
  * Two rendering tiers:
  * 1. MapTiler (key present): streets-v2-dark + 3D terrain elevation + sky/fog
- *    atmosphere + globe projection at low zoom. Cinematic.
- * 2. Fallback (no key / quota hit): Carto dark-matter, flat 2D. Still looks good.
- *
- * Features:
- * - Discovery mode: photo/emoji circle markers with pop-in animation
- * - Route mode: numbered markers + glowing polyline
- * - Fit bounds on new search (not on food append)
- * - Fly to selected POI
- * - 3D perspective (45° pitch)
- * - Runtime fallback: if MapTiler style fails to load, swaps to Carto
+ * 2. Fallback (no key / quota hit): Carto dark-matter, flat 2D
  */
 
-import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import {
   Map as MapGL,
   Marker,
@@ -41,31 +39,19 @@ interface MapProps {
   selectedDay?: number;
 }
 
-const DEFAULT_CENTER: [number, number] = [2.3522, 48.8566]; // [lng, lat]
+const DEFAULT_CENTER: [number, number] = [2.3522, 48.8566];
 
 /* ─── Map Style Configuration ─── */
 const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_KEY;
-
-// Premium: MapTiler streets-v2-dark with 3D buildings baked in
 const MAPTILER_STYLE = MAPTILER_KEY
   ? `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${MAPTILER_KEY}`
   : null;
-
-// Free fallback: Carto dark-matter (no key needed, unlimited)
 const FALLBACK_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
-
-// MapTiler terrain tiles for 3D elevation (included in free tier)
 const TERRAIN_SOURCE_URL = MAPTILER_KEY
   ? `https://api.maptiler.com/tiles/terrain-rgb-v2/tiles.json?key=${MAPTILER_KEY}`
   : null;
-
-// Whether we have MapTiler features available
 const HAS_MAPTILER = Boolean(MAPTILER_KEY);
 
-/**
- * Sky specification for MapTiler — dark cinematic atmosphere.
- * Subtle fog at the horizon gives depth without obscuring the map.
- */
 const MAPTILER_SKY: SkySpecification = {
   'sky-color': '#0b0d1a',
   'sky-horizon-blend': 0.4,
@@ -76,16 +62,12 @@ const MAPTILER_SKY: SkySpecification = {
   'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 12, 0.3, 16, 0],
 };
 
-/**
- * Terrain specification — subtle exaggeration so cities look flat
- * but hills/mountains near the city are visible.
- */
 const MAPTILER_TERRAIN: TerrainSpecification = {
   source: 'maptiler-terrain',
   exaggeration: 1.2,
 };
 
-/* ─── Polyline decoder (Google encoded format → [lng, lat][]) ─── */
+/* ─── Polyline decoder ─── */
 function decodePolyline(encoded: string): [number, number][] {
   if (!encoded) return [];
   const points: [number, number][] = [];
@@ -102,7 +84,7 @@ function decodePolyline(encoded: string): [number, number][] {
   return points;
 }
 
-/* ─── Emoji map for POI types ─── */
+/* ─── Emoji map ─── */
 const PLACE_EMOJIS: Record<string, string> = {
   museum: '🏛️', cafe: '☕', landmark: '🏰', church: '⛪', park: '🌳',
   restaurant: '🍽️', bar: '🍸', viewpoint: '👀', market: '🛒', gallery: '🎨',
@@ -110,8 +92,46 @@ const PLACE_EMOJIS: Record<string, string> = {
   tower: '🗼', club: '🎵',
 };
 
-/* ─── POI Marker (discovery mode) ─── */
-function POIMarker({
+/* ─── Hoisted static styles (avoid re-creating objects every render) ─── */
+const MARKER_IMG_STYLE: React.CSSProperties = { width: '100%', height: '100%', objectFit: 'cover' };
+
+const ACCEPTED_BADGE_STYLE: React.CSSProperties = {
+  position: 'absolute', bottom: -2, right: -2,
+  width: 20, height: 20,
+  background: 'var(--trail-green)',
+  borderRadius: '50%', border: '2px solid white',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+};
+
+const ROUTE_TOOLTIP_BASE: React.CSSProperties = {
+  position: 'absolute',
+  left: '50%',
+  transform: 'translateX(-50%)',
+  whiteSpace: 'nowrap',
+  background: 'rgba(255, 255, 255, 0.92)',
+  backdropFilter: 'blur(8px)',
+  color: 'var(--ink)',
+  padding: '5px 12px',
+  borderRadius: 8,
+  fontSize: 12,
+  fontFamily: 'var(--font-body)',
+  fontWeight: 600,
+  boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+  pointerEvents: 'none',
+  animation: 'fadeIn 0.2s ease',
+};
+
+
+/* ─── Accepted badge SVG (static) ─── */
+const acceptedBadgeSvg = (
+  <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+    <path d="M2 6L5 9L10 3" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
+  </svg>
+);
+
+/* ─── POI Marker (memoized) ─── */
+const POIMarker = React.memo(function POIMarker({
   poi, isSelected, isAccepted, shouldAnimate, animDelay, onClick,
 }: {
   poi: POI; isSelected: boolean; isAccepted: boolean;
@@ -120,6 +140,7 @@ function POIMarker({
   const size = isSelected ? 56 : 46;
   const emoji = PLACE_EMOJIS[poi.types?.[0] || 'landmark'] || '📍';
   const photoUrl = poi.photos?.[0] || null;
+  const [imgFailed, setImgFailed] = useState(false);
 
   const borderColor = isAccepted
     ? 'var(--trail-green)'
@@ -133,6 +154,31 @@ function POIMarker({
       ? '0 2px 16px rgba(212, 168, 83, 0.5), 0 0 0 3px rgba(212, 168, 83, 0.15)'
       : '0 2px 8px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.04)';
 
+  const wrapStyle = useMemo<React.CSSProperties>(() => ({
+    animation: shouldAnimate ? `poiPopIn 0.4s cubic-bezier(0.34,1.56,0.64,1) ${animDelay}ms both` : undefined,
+    cursor: 'pointer',
+  }), [shouldAnimate, animDelay]);
+
+  const circleStyle = useMemo<React.CSSProperties>(() => ({
+    width: size,
+    height: size,
+    borderRadius: '50%',
+    overflow: 'hidden',
+    background: 'white',
+    border: `${isAccepted || isSelected ? 3 : 2.5}px solid ${borderColor}`,
+    boxShadow: shadow,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+  }), [size, isAccepted, isSelected, borderColor, shadow]);
+
+  const tooltipStyle = useMemo<React.CSSProperties>(
+    () => ({ ...ROUTE_TOOLTIP_BASE, top: size + 6 }),
+    [size]
+  );
+
   return (
     <Marker
       longitude={poi.coordinates.lng}
@@ -141,88 +187,66 @@ function POIMarker({
       onClick={(e) => { e.originalEvent.stopPropagation(); onClick(); }}
       style={{ zIndex: isSelected ? 100 : isAccepted ? 50 : 1 }}
     >
-      <div
-        className="poi-marker-wrap"
-        style={{
-          animation: shouldAnimate ? `poiPopIn 0.4s cubic-bezier(0.34,1.56,0.64,1) ${animDelay}ms both` : undefined,
-          cursor: 'pointer',
-        }}
-        title={poi.name}
-      >
-        {/* Outer ring for selected/accepted */}
-        <div style={{
-          width: size,
-          height: size,
-          borderRadius: '50%',
-          overflow: 'hidden',
-          background: 'white',
-          border: `${isAccepted || isSelected ? 3 : 2.5}px solid ${borderColor}`,
-          boxShadow: shadow,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          position: 'relative',
-          transition: 'transform 0.2s ease, box-shadow 0.2s ease',
-        }}>
-          {photoUrl ? (
+      <div className="poi-marker-wrap" style={wrapStyle} title={poi.name}>
+        <div style={circleStyle}>
+          {photoUrl && !imgFailed ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={photoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            <img
+              src={photoUrl}
+              alt=""
+              loading="lazy"
+              style={MARKER_IMG_STYLE}
+              onError={() => setImgFailed(true)}
+            />
           ) : (
             <span style={{ fontSize: isSelected ? 24 : 20, lineHeight: 1 }}>{emoji}</span>
           )}
         </div>
 
-        {/* Accepted badge */}
-        {isAccepted && (
-          <div style={{
-            position: 'absolute', bottom: -2, right: -2,
-            width: 20, height: 20,
-            background: 'var(--trail-green)',
-            borderRadius: '50%', border: '2px solid white',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-          }}>
-            <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-              <path d="M2 6L5 9L10 3" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
-            </svg>
-          </div>
-        )}
+        {isAccepted && <div style={ACCEPTED_BADGE_STYLE}>{acceptedBadgeSvg}</div>}
 
-        {/* Name label on selected */}
-        {isSelected && (
-          <div style={{
-            position: 'absolute',
-            top: size + 6,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            whiteSpace: 'nowrap',
-            background: 'rgba(255, 255, 255, 0.92)',
-            backdropFilter: 'blur(8px)',
-            color: 'var(--ink)',
-            padding: '5px 12px',
-            borderRadius: 8,
-            fontSize: 12,
-            fontFamily: 'var(--font-body)',
-            fontWeight: 600,
-            boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
-            pointerEvents: 'none',
-            animation: 'fadeIn 0.2s ease',
-          }}>
-            {poi.name}
-          </div>
-        )}
+        {isSelected && <div style={tooltipStyle}>{poi.name}</div>}
       </div>
     </Marker>
   );
-}
+});
 
-/* ─── Route Marker (itinerary mode) ─── */
-function RouteMarker({
+/* ─── Route Marker (memoized) ─── */
+const RouteMarker = React.memo(function RouteMarker({
   poi, index, isSelected, onClick,
 }: {
   poi: POI; index: number; isSelected: boolean; onClick: () => void;
 }) {
   const size = isSelected ? 42 : 34;
+
+  const circleStyle = useMemo<React.CSSProperties>(() => ({
+    width: size,
+    height: size,
+    borderRadius: '50%',
+    background: isSelected
+      ? 'linear-gradient(135deg, var(--compass-gold), var(--compass-gold-dark))'
+      : 'var(--ink)',
+    color: 'white',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontFamily: 'var(--font-body)',
+    fontWeight: 700,
+    fontSize: isSelected ? 16 : 13,
+    border: `2.5px solid ${isSelected ? 'var(--compass-gold-light)' : 'rgba(255,255,255,0.9)'}`,
+    boxShadow: isSelected
+      ? '0 3px 16px rgba(212, 168, 83, 0.5), 0 0 0 3px rgba(212, 168, 83, 0.12)'
+      : '0 2px 8px rgba(0,0,0,0.25)',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    animation: `routeMarkerPop 0.3s cubic-bezier(0.34,1.56,0.64,1) ${index * 60}ms both`,
+  }), [size, isSelected, index]);
+
+  const tooltipStyle = useMemo<React.CSSProperties>(
+    () => ({ ...ROUTE_TOOLTIP_BASE, top: size + 6 }),
+    [size]
+  );
+
   return (
     <Marker
       longitude={poi.coordinates.lng}
@@ -232,89 +256,25 @@ function RouteMarker({
       style={{ zIndex: isSelected ? 100 : 10 }}
     >
       <div style={{ position: 'relative' }}>
-        <div style={{
-          width: size,
-          height: size,
-          borderRadius: '50%',
-          background: isSelected
-            ? 'linear-gradient(135deg, var(--compass-gold), var(--compass-gold-dark))'
-            : 'var(--ink)',
-          color: 'white',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontFamily: 'var(--font-body)',
-          fontWeight: 700,
-          fontSize: isSelected ? 16 : 13,
-          border: `2.5px solid ${isSelected ? 'var(--compass-gold-light)' : 'rgba(255,255,255,0.9)'}`,
-          boxShadow: isSelected
-            ? '0 3px 16px rgba(212, 168, 83, 0.5), 0 0 0 3px rgba(212, 168, 83, 0.12)'
-            : '0 2px 8px rgba(0,0,0,0.25)',
-          cursor: 'pointer',
-          transition: 'all 0.2s ease',
-          animation: `routeMarkerPop 0.3s cubic-bezier(0.34,1.56,0.64,1) ${index * 60}ms both`,
-        }}>
-          {index + 1}
-        </div>
-
-        {/* Name tooltip on selected */}
-        {isSelected && (
-          <div style={{
-            position: 'absolute',
-            top: size + 6,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            whiteSpace: 'nowrap',
-            background: 'rgba(255, 255, 255, 0.92)',
-            backdropFilter: 'blur(8px)',
-            color: 'var(--ink)',
-            padding: '5px 12px',
-            borderRadius: 8,
-            fontSize: 12,
-            fontFamily: 'var(--font-body)',
-            fontWeight: 600,
-            boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
-            pointerEvents: 'none',
-            animation: 'fadeIn 0.2s ease',
-          }}>
-            {poi.name}
-          </div>
-        )}
+        <div style={circleStyle}>{index + 1}</div>
+        {isSelected && <div style={tooltipStyle}>{poi.name}</div>}
       </div>
     </Marker>
   );
-}
+});
 
-/* ─── Route Line Styles (bold 3D-visible glow: renders above buildings) ─── */
-// Outermost halo — wide soft glow so the route is visible behind 3D buildings
-const routeLineHalo = {
-  id: 'route-line-halo',
-  type: 'line' as const,
-  paint: {
-    'line-color': '#d4a853',
-    'line-width': 24,
-    'line-opacity': 0.15,
-    'line-blur': 16,
-  },
-  layout: {
-    'line-join': 'round' as const,
-    'line-cap': 'round' as const,
-  },
-};
 
+/* ─── Route Line Styles (reduced from 4 to 3 layers) ─── */
 const routeLineGlow = {
   id: 'route-line-glow',
   type: 'line' as const,
   paint: {
-    'line-color': '#e8c97a',
-    'line-width': 14,
-    'line-opacity': 0.4,
-    'line-blur': 6,
+    'line-color': '#d4a853',
+    'line-width': 18,
+    'line-opacity': 0.25,
+    'line-blur': 10,
   },
-  layout: {
-    'line-join': 'round' as const,
-    'line-cap': 'round' as const,
-  },
+  layout: { 'line-join': 'round' as const, 'line-cap': 'round' as const },
 };
 
 const routeLineMain = {
@@ -325,10 +285,7 @@ const routeLineMain = {
     'line-width': 5,
     'line-opacity': 0.95,
   },
-  layout: {
-    'line-join': 'round' as const,
-    'line-cap': 'round' as const,
-  },
+  layout: { 'line-join': 'round' as const, 'line-cap': 'round' as const },
 };
 
 const routeLineDash = {
@@ -340,10 +297,7 @@ const routeLineDash = {
     'line-opacity': 0.4,
     'line-dasharray': [2, 4],
   },
-  layout: {
-    'line-join': 'round' as const,
-    'line-cap': 'round' as const,
-  },
+  layout: { 'line-join': 'round' as const, 'line-cap': 'round' as const },
 };
 
 /* ─── Fit Bounds Controller ─── */
@@ -356,7 +310,6 @@ function FitBoundsController({
   const prevPoisRef = useRef<string[]>([]);
   const hasFittedRef = useRef(false);
 
-  // Fly to selected POI
   useEffect(() => {
     if (!map || !selectedPoi) return;
     map.flyTo({
@@ -367,21 +320,18 @@ function FitBoundsController({
     });
   }, [map, selectedPoi]);
 
-  // Fit bounds on new search (skip appends like food POIs)
   useEffect(() => {
     if (!map || pois.length === 0) return;
 
     const currentIds = pois.map(p => p.place_id);
     const prevIds = prevPoisRef.current;
 
-    // Detect append: all previous IDs still present in current list (Set for O(1) lookups — 7.11)
     const isAppend =
       prevIds.length > 0 &&
       currentIds.length > prevIds.length &&
       (() => { const currentSet = new Set(currentIds); return prevIds.every(id => currentSet.has(id)); })();
 
     prevPoisRef.current = currentIds;
-    if (isAppend) return; // Food POIs appended — don't re-zoom
 
     const lngs = pois.map(p => p.coordinates.lng);
     const lats = pois.map(p => p.coordinates.lat);
@@ -390,11 +340,16 @@ function FitBoundsController({
       [Math.max(...lngs) + 0.01, Math.max(...lats) + 0.01],
     ];
 
-    map.fitBounds(bounds, { padding: 80, duration: 1200, maxZoom: 16, pitch: 45 });
+    if (isAppend) {
+      // Food POIs appended — gentle zoom out to show all markers
+      map.fitBounds(bounds, { padding: 80, duration: 1600, maxZoom: 15, pitch: 45 });
+    } else {
+      // Fresh set of POIs — standard fit
+      map.fitBounds(bounds, { padding: 80, duration: 1200, maxZoom: 16, pitch: 45 });
+    }
     hasFittedRef.current = true;
   }, [map, pois]);
 
-  // Fly to center when no POIs (initial load or city change)
   useEffect(() => {
     if (!map || !center || pois.length > 0) return;
     if (hasFittedRef.current) return;
@@ -404,16 +359,19 @@ function FitBoundsController({
   return null;
 }
 
-/* ─── Main Map Component ─── */
-export function Map({
+/* ─── Empty set singleton (avoids new Set() default on every render) ─── */
+const EMPTY_SET = new Set<string>();
+const EMPTY_POIS: POI[] = [];
+
+/* ─── Main Map Component (wrapped in React.memo) ─── */
+export const Map = React.memo(function MapInner({
   itinerary, selectedPoi, onPinClick,
-  suggestedPois = [], acceptedPois = new Set(),
+  suggestedPois = EMPTY_POIS, acceptedPois = EMPTY_SET,
   center, selectedDay,
 }: MapProps) {
   const [animatedIds, setAnimatedIds] = useState<Set<string>>(() => new Set());
   const prevSuggestedRef = useRef<string[]>([]);
 
-  // Runtime fallback: if MapTiler style fails (quota, network), swap to Carto
   const [mapStyle, setMapStyle] = useState(MAPTILER_STYLE ?? FALLBACK_STYLE);
   const [useTerrain, setUseTerrain] = useState(HAS_MAPTILER);
   const hasFallenBackRef = useRef(false);
@@ -430,10 +388,8 @@ export function Map({
   // Track newly added POIs for pop-in animation
   useEffect(() => {
     const currentIds = suggestedPois.map(p => p.place_id);
-    const prevSet = new Set(prevSuggestedRef.current); // Set for O(1) lookups — 7.11
+    const prevSet = new Set(prevSuggestedRef.current);
     const newIds = currentIds.filter(id => !prevSet.has(id));
-
-    // Always update ref to avoid stale state (5.3 narrow deps)
     prevSuggestedRef.current = currentIds;
 
     if (newIds.length > 0) {
@@ -443,7 +399,6 @@ export function Map({
     }
   }, [suggestedPois]);
 
-  // Build route GeoJSON from encoded polyline
   const routeGeoJSON = useMemo(() => {
     const polyline = itinerary?.route?.polyline;
     if (!polyline) return null;
@@ -455,7 +410,6 @@ export function Map({
     };
   }, [itinerary?.route?.polyline]);
 
-  // Fallback straight lines when no encoded polyline
   const fallbackGeoJSON = useMemo(() => {
     if (routeGeoJSON) return null;
     const ordered = itinerary?.route?.ordered_pois;
@@ -478,7 +432,6 @@ export function Map({
 
   const isDiscoveryMode = !itinerary && suggestedPois.length > 0;
   const isRouteMode = Boolean(itinerary?.route?.ordered_pois);
-  // Stable key: only remount on day change, NOT on POI count change.
   const boundsKey = `bounds-${selectedDay ?? 0}`;
 
   return (
@@ -494,33 +447,17 @@ export function Map({
       mapStyle={mapStyle}
       attributionControl={{}}
       maxPitch={60}
-      // 3D terrain + sky atmosphere (MapTiler only)
       terrain={useTerrain ? MAPTILER_TERRAIN : undefined}
       sky={useTerrain ? MAPTILER_SKY : undefined}
-      // Runtime error fallback
       onError={handleStyleError}
     >
       <NavigationControl position="bottom-right" showCompass />
-
-      {/* Terrain toggle button (MapTiler only) */}
       {useTerrain && <TerrainControl position="bottom-right" source="maptiler-terrain" exaggeration={1.2} />}
-
-      {/* MapTiler terrain DEM source — raster elevation tiles for 3D */}
       {useTerrain && TERRAIN_SOURCE_URL && (
-        <Source
-          id="maptiler-terrain"
-          type="raster-dem"
-          url={TERRAIN_SOURCE_URL}
-          tileSize={256}
-        />
+        <Source id="maptiler-terrain" type="raster-dem" url={TERRAIN_SOURCE_URL} tileSize={256} />
       )}
 
-      <FitBoundsController
-        key={boundsKey}
-        pois={allPois}
-        selectedPoi={selectedPoi}
-        center={center}
-      />
+      <FitBoundsController key={boundsKey} pois={allPois} selectedPoi={selectedPoi} center={center} />
 
       {/* Discovery markers */}
       {isDiscoveryMode &&
@@ -548,10 +485,9 @@ export function Map({
           />
         ))}
 
-      {/* Route polyline — 4-layer glow effect (visible above 3D buildings) */}
+      {/* Route polyline — 3-layer glow effect */}
       {lineData && (
         <Source id="route" type="geojson" data={lineData}>
-          <Layer {...routeLineHalo} />
           <Layer {...routeLineGlow} />
           <Layer {...routeLineMain} />
           <Layer {...routeLineDash} />
@@ -559,4 +495,4 @@ export function Map({
       )}
     </MapGL>
   );
-}
+});

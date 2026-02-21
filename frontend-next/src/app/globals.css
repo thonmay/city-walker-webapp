@@ -206,6 +206,7 @@ body {
 }
 
 /* ─── Z-index layers ─── */
+.z-999 { z-index: 999; }
 .z-1000 { z-index: 1000; }
 .z-1001 { z-index: 1001; }
 
@@ -273,4 +274,35 @@ body::before {
 .glass:hover {
   backdrop-filter: blur(20px) saturate(1.4);
   -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}
+
+/* ─── Mobile Responsiveness ─── */
+@media (max-width: 639px) {
+  /* Safe area padding for notched phones */
+  .z-1000 {
+    padding-top: env(safe-area-inset-top, 0);
+  }
+
+  /* Prevent text size adjustment on orientation change */
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  /* Larger touch targets on mobile */
+  button, a {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Prevent zoom on input focus (iOS) */
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+
+  /* Hide scrollbar on mobile for cleaner look */
+  ::-webkit-scrollbar {
+    width: 0;
+    display: none;
+  }
 }

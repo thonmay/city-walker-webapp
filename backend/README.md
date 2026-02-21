@@ -1,120 +1,110 @@
 # City Walker Backend
 
-A trustworthy city itinerary planner backend built with FastAPI.
-
-## Overview
-
-City Walker creates optimal walking, driving, or transit routes between multiple points of interest (POIs). The backend serves as an API gateway for all external API calls, ensuring data accuracy by using Google APIs as the single source of truth.
+FastAPI backend for City Walker — handles AI-powered POI discovery, geocoding, image fetching, and route optimization.
 
 ## Tech Stack
 
-- **FastAPI**: High-performance async web framework
-- **Pydantic**: Data validation and serialization
-- **Redis**: Response caching
-- **GeminiAPI**: Gemma 3, 27b, AI reasoning for input interpretation and POI ranking
-- **NetworkX**: Graph-based route optimization
-- **NumPy**: Numerical operations for distance matrices
+- **FastAPI** — async web framework with automatic OpenAPI docs
+- **Pydantic v2** — request/response validation
+- **Groq LPU** — primary AI provider (Llama 3.1 8B Instant, ~1.5s)
+- **Google Gemini** — fallback AI provider (Gemma 3 4B, ~6s)
+- **OSRM** — route optimization (public API, no key needed)
+- **Nominatim + Photon** — geocoding via OpenStreetMap
+- **Wikipedia API** — POI images from Wikimedia Commons
+- **Redis** — optional response caching
+- **httpx** — async HTTP client for all external API calls
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.11+
-- Redis server (for caching)
+- Redis (optional, for caching)
 
 ### Installation
 
-1. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# Edit .env with your API keys
+```
 
-2. Install dependencies:
-   ```bash
-   pip install -e ".[dev]"
-   ```
-   
-   Or using requirements.txt:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Copy the environment template and configure:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys
-   ```
-
-### Running the Server
+### Running
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-The API will be available at `http://localhost:8000`.
-
-### API Documentation
-
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## Testing
-
-Run all tests:
-```bash
-pytest
-```
-
-Run with coverage:
-```bash
-pytest --cov=app --cov-report=html
-```
-
-Run property-based tests only:
-```bash
-pytest tests/property/
-```
-
-## Project Structure
-
-```
-backend/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI application entry point
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── routes.py        # API route definitions
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── poi.py           # POI and related models
-│   │   ├── route.py         # Route and itinerary models
-│   │   └── errors.py        # Error types
-│   └── services/
-│       ├── __init__.py
-│       ├── ai_reasoning/    # AI interpretation and ranking
-│       ├── cache/           # Redis caching
-│       ├── place_validator/ # Google Places API integration
-│       └── route_optimizer/ # Route optimization with NetworkX
-├── tests/
-│   ├── __init__.py
-│   ├── conftest.py          # Pytest fixtures
-│   ├── unit/                # Unit tests
-│   └── property/            # Property-based tests (Hypothesis)
-├── pyproject.toml
-├── requirements.txt
-└── README.md
-```
+API docs at `http://localhost:8000/docs`.
 
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `GOOGLE_PLACES_API_KEY` | Google Places API key | Yes |
-| `GOOGLE_DIRECTIONS_API_KEY` | Google Directions API key | Yes |
-| `OPENAI_API_KEY` | OpenAI API key | Yes |
-| `REDIS_URL` | Redis connection URL | No (defaults to localhost) |
+| `GROQ_API_KEY` | Groq API key (primary AI) | Yes (or GEMINI) |
+| `GEMINI_API_KEY` | Google Gemini API key (fallback AI) | Yes (or GROQ) |
+| `REDIS_URL` | Redis connection URL | No |
+| `CORS_ORIGIN` | Additional CORS origin | No |
+
+## API Endpoints
+
+All routes are prefixed with `/api`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/discover` | AI-powered POI discovery for a city |
+| POST | `/discover/food` | Find cafes, restaurants, bars near route |
+| POST | `/geocode` | Geocode a place name to coordinates |
+| POST | `/geocode/batch` | Batch geocode multiple places |
+| GET | `/city-center/{city}` | Get city center coordinates |
+| POST | `/lookup-pois` | Look up POIs by name with images |
+| POST | `/route/from-selection` | Generate optimized route from selected POIs |
+| POST | `/itinerary` | Create full itinerary (legacy) |
+| GET | `/place/{place_id}` | Place details |
+| GET | `/health` | Health check |
+
+## Project Structure
+
+```
+app/
+├── main.py                 # FastAPI app, CORS, error handlers
+├── api/
+│   └── routes.py           # All API endpoints
+├── models/
+│   ├── core.py             # POI, Route, TimeConstraint models
+│   └── errors.py           # Error codes and AppError
+├── services/
+│   ├── ai_reasoning/       # Groq/Gemini POI discovery
+│   ├── cache/              # Redis caching layer
+│   ├── osm/                # OpenStreetMap Overpass queries
+│   ├── place_validator/    # Nominatim/Photon geocoding
+│   ├── route_optimizer/    # OSRM routing + 2-opt
+│   └── wikipedia/          # Wikipedia/Wikimedia images
+└── utils/
+    ├── cache.py            # Cache key helpers
+    └── geo.py              # Haversine distance, geo utils
+```
+
+## Testing
+
+```bash
+# Run all tests
+pytest
+
+# With coverage
+pytest --cov=app --cov-report=html
+
+# Specific test file
+pytest tests/unit/test_cache_service.py
+```
+
+44 tests covering caching, place validation, and service logic. Uses pytest-asyncio for async tests and hypothesis for property-based testing.
+
+## Deployment
+
+Configured for Render via `render.yaml`. See the root README for deployment instructions.
 
 ## License
 

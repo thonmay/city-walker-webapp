@@ -1,46 +1,55 @@
 """City Walker Services.
 
-This module contains all service layer components including:
-- Cache service for Redis-based caching
-- AI reasoning service (Groq primary, Gemini fallback)
-- Place validator service for geocoding and validation
-- Route optimizer service for route calculation
+Service layer components:
+- Cache: Redis-based caching with in-memory LRU fallback
+- AI Reasoning: Groq (primary) + Gemini (fallback) for landmark suggestions
+- Place Validator: OpenStreetMap Nominatim geocoding and validation
+- Route Optimizer: OSRM-based route calculation and optimization
+- OSM: OpenStreetMap Overpass API for venue queries
+- Wikipedia: Image enrichment for landmarks
 """
 
 from .cache import CacheService, RedisCacheService
-from .ai_reasoning import AIReasoningService, GeminiReasoningService, GroqReasoningService, RankedPOI, LandmarkSuggestion, create_ai_service
+from .ai_reasoning import (
+    AIReasoningService,
+    GeminiReasoningService,
+    GroqReasoningService,
+    RankedPOI,
+    LandmarkSuggestion,
+    create_ai_service,
+)
 from .place_validator import (
     PlaceValidatorService,
     OpenStreetMapValidatorService,
-    GooglePlaceValidatorService,
+    GooglePlaceValidatorService,  # Deprecated alias
     ValidationResult,
     StructuredQuery,
 )
 from .route_optimizer import (
     RouteOptimizerService,
     OSRMRouteOptimizerService,
-    GoogleRouteOptimizerService,
+    GoogleRouteOptimizerService,  # Deprecated alias
     DistanceMatrix,
 )
 
 __all__ = [
-    # Cache service
+    # Cache
     "CacheService",
     "RedisCacheService",
-    # AI reasoning service
+    # AI reasoning
     "AIReasoningService",
     "GeminiReasoningService",
     "GroqReasoningService",
     "RankedPOI",
     "LandmarkSuggestion",
     "create_ai_service",
-    # Place validator service
+    # Place validator
     "PlaceValidatorService",
     "OpenStreetMapValidatorService",
     "GooglePlaceValidatorService",
     "ValidationResult",
     "StructuredQuery",
-    # Route optimizer service
+    # Route optimizer
     "RouteOptimizerService",
     "OSRMRouteOptimizerService",
     "GoogleRouteOptimizerService",

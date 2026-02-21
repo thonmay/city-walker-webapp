@@ -162,6 +162,8 @@ export function HomeBaseInput({ value, onChange, city = '', className = '' }: Ho
           <div className="relative flex-1">
             <input
               ref={inputRef}
+              id="homebase-search"
+              name="homebase"
               type="text"
               value={searchQuery}
               onChange={e => handleSearchChange(e.target.value)}

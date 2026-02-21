@@ -117,6 +117,12 @@ class POI(BaseModel):
     why_visit: Optional[str] = Field(
         None, description="Brief reason why this place is worth visiting"
     )
+    admission: Optional[str] = Field(
+        None, description="Admission info: 'free', '~15 EUR', etc."
+    )
+    admission_url: Optional[str] = Field(
+        None, description="URL to official ticket/booking page"
+    )
 
 
 class RouteLeg(BaseModel):

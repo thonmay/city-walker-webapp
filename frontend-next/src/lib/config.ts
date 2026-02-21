@@ -8,3 +8,4 @@ export const API_BASE_URL =
 export const DEFAULT_CENTER = { lat: 48.8566, lng: 2.3522 }; // Paris
 
 export const MAX_SINGLE_DAY_POIS = 10;
+export const MAX_TOTAL_POIS = 30;

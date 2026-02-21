@@ -30,14 +30,31 @@ try:
 except Exception:
     pass  # Python 3.14+ compat
 
-# ── System prompt: think like a local, suggest hidden gems ──
+# ── System prompt: famous landmarks first, then hidden gems ──
 SYSTEM_PROMPT = (
-    "You are a passionate local travel expert who has lived in cities around the world. "
-    "Think like a local, not a tourist. You know the hidden gems — the quiet courtyard "
-    "behind the cathedral, the tiny family-run trattoria that doesn't appear in guidebooks, "
-    "the street art alley that only neighborhood residents know about. "
-    "Mix iconic must-see landmarks with off-the-beaten-path spots that give travelers "
-    "an authentic feel for the city. "
+    "You are a world-class travel guide with encyclopedic knowledge of every city on Earth. "
+    "Your TOP PRIORITY is to NEVER miss a single famous landmark or must-see attraction. "
+    "For any city, you MUST include ALL of the following if they exist:\n"
+    "- Iconic monuments, world-famous museums, historic cathedrals/churches/mosques/temples\n"
+    "- Royal palaces, castles, fortresses, citadels\n"
+    "- Famous bridges, renowned squares/plazas, UNESCO World Heritage sites\n"
+    "- Scenic viewpoints, hilltops, observation towers, rooftop terraces\n"
+    "- River/lake/sea promenades, waterfront walks, famous harbors\n"
+    "- Beautiful parks, botanical gardens, historic cemeteries\n"
+    "- Famous markets, bazaars, food halls\n"
+    "- Unique city-specific attractions that make this place special:\n"
+    "  Budapest → thermal baths, ruin bars. Rome → catacombs, ancient ruins.\n"
+    "  Baku → Carpet Museum, Flame Towers. Istanbul → hammams, cisterns.\n"
+    "  Tokyo → shrines, anime districts. Marrakech → riads, souks.\n"
+    "  Amsterdam → canals, houseboats. Prague → astronomical clock, beer halls.\n"
+    "After covering every major attraction, THEN add hidden gems that locals love — "
+    "the quiet courtyard, the tiny family-run trattoria, the street art alley "
+    "that only neighborhood residents know about. "
+    "A good mix is 70% must-see famous spots and 30% local hidden gems. "
+    "IMPORTANT: Only suggest places WITHIN the city limits (max 30km from center). "
+    "Do NOT suggest places in other cities or countries. "
+    "For places that require admission, include the approximate ticket price in EUR/USD "
+    "and whether there are free days or discounts. "
     "Respond ONLY with valid JSON. No explanations, no markdown, no extra text."
 )
 
@@ -58,6 +75,8 @@ class LandmarkSuggestion:
     why_visit: str
     visit_duration_hours: float = 1.0
     specialty: str = ""
+    admission: str | None = None       # e.g. "free", "~15 EUR", "~25 USD"
+    admission_url: str | None = None   # Official ticket website
 
 
 class AIReasoningService(ABC):
@@ -115,22 +134,125 @@ class AIReasoningService(ABC):
 
     @staticmethod
     def _get_suggestion_count(time_constraint: str | None) -> int:
-        return {"6h": 10, "day": 18, "2days": 25, "3days": 35, "5days": 50}.get(
-            time_constraint, 18
+        """Return how many landmarks to request from AI.
+
+        Always request at least 25 so users have plenty to choose from,
+        even for small cities.
+        """
+        return {"6h": 25, "day": 30, "2days": 40, "3days": 50, "5days": 50}.get(
+            time_constraint, 30
         )
 
     @staticmethod
-    def _get_fallback_landmarks(city: str) -> list[LandmarkSuggestion]:
-        return [
-            LandmarkSuggestion(f"{city} Cathedral", "church", "Historic cathedral"),
-            LandmarkSuggestion(f"{city} Castle", "landmark", "Historic castle", 1.5),
+    def _get_fallback_landmarks(
+        city: str,
+        city_lat: float | None = None,
+        city_lng: float | None = None,
+    ) -> list[LandmarkSuggestion]:
+        """Return region-aware fallback landmarks when AI fails.
+
+        Uses the city's coordinates to detect the rough geographic region
+        and generate culturally appropriate landmark patterns that geocode
+        well on Nominatim/Photon.
+
+        Args:
+            city: The city name to generate fallbacks for.
+            city_lat: Optional latitude for region detection.
+            city_lng: Optional longitude for region detection.
+
+        Returns:
+            A list of ``LandmarkSuggestion`` objects tailored to the region.
+        """
+        # Universal landmarks that work everywhere
+        universal = [
             LandmarkSuggestion(f"Old Town {city}", "landmark", "Historic old town", 2.0),
             LandmarkSuggestion(f"{city} City Hall", "landmark", "Historic city hall", 0.5),
-            LandmarkSuggestion(f"{city} Main Square", "square", "Central square", 0.5),
-            LandmarkSuggestion(f"{city} Museum", "museum", "City museum", 1.5),
-            LandmarkSuggestion(f"{city} Park", "park", "City park"),
-            LandmarkSuggestion(f"{city} Market", "market", "Local market"),
+            LandmarkSuggestion(f"{city} National Museum", "museum", "National museum", 1.5),
+            LandmarkSuggestion(f"{city} Central Park", "park", "City park"),
+            LandmarkSuggestion(f"{city} University", "landmark", "Historic university", 0.5),
+            LandmarkSuggestion(f"{city} Art Gallery", "museum", "Art gallery", 1.5),
+            LandmarkSuggestion(f"{city} Train Station", "landmark", "Historic train station", 0.5),
+            LandmarkSuggestion(f"{city} Waterfront", "viewpoint", "Waterfront promenade", 1.0),
+            LandmarkSuggestion(f"{city} Tower", "viewpoint", "City tower or observation point", 1.0),
         ]
+
+        # Region-specific landmarks based on coordinates
+        region_specific: list[LandmarkSuggestion] = []
+
+        if city_lat is not None and city_lng is not None:
+            is_east_asia = 20 < city_lat < 50 and 100 < city_lng < 150
+            is_south_asia = 5 < city_lat < 35 and 65 < city_lng < 100
+            is_southeast_asia = -10 < city_lat < 25 and 95 < city_lng < 145
+            is_middle_east = 15 < city_lat < 42 and 25 < city_lng < 65
+            is_americas = -60 < city_lat < 75 and -170 < city_lng < -30
+
+            if is_east_asia:
+                region_specific = [
+                    LandmarkSuggestion(f"{city} Temple", "church", "Historic temple", 1.0),
+                    LandmarkSuggestion(f"{city} Shrine", "church", "Traditional shrine", 0.5),
+                    LandmarkSuggestion(f"{city} Palace", "palace", "Imperial or royal palace", 1.5),
+                    LandmarkSuggestion(f"{city} Garden", "park", "Traditional garden", 1.0),
+                    LandmarkSuggestion(f"{city} Market", "market", "Local market", 1.0),
+                    LandmarkSuggestion(f"{city} Pagoda", "church", "Historic pagoda", 0.5),
+                ]
+            elif is_south_asia:
+                region_specific = [
+                    LandmarkSuggestion(f"{city} Temple", "church", "Historic temple", 1.0),
+                    LandmarkSuggestion(f"{city} Fort", "landmark", "Historic fort", 1.5),
+                    LandmarkSuggestion(f"{city} Palace", "palace", "Royal palace", 1.5),
+                    LandmarkSuggestion(f"{city} Mosque", "church", "Historic mosque", 0.5),
+                    LandmarkSuggestion(f"{city} Market", "market", "Local bazaar", 1.0),
+                    LandmarkSuggestion(f"{city} Gate", "landmark", "Historic city gate", 0.5),
+                ]
+            elif is_southeast_asia:
+                region_specific = [
+                    LandmarkSuggestion(f"{city} Temple", "church", "Historic temple", 1.0),
+                    LandmarkSuggestion(f"{city} Palace", "palace", "Royal palace", 1.5),
+                    LandmarkSuggestion(f"{city} Market", "market", "Local market", 1.0),
+                    LandmarkSuggestion(f"{city} Mosque", "church", "Historic mosque", 0.5),
+                    LandmarkSuggestion(f"{city} Botanical Garden", "park", "Botanical garden", 1.5),
+                    LandmarkSuggestion(f"{city} Chinatown", "landmark", "Historic Chinatown", 1.0),
+                ]
+            elif is_middle_east:
+                region_specific = [
+                    LandmarkSuggestion(f"{city} Mosque", "church", "Grand mosque", 1.0),
+                    LandmarkSuggestion(f"{city} Bazaar", "market", "Historic bazaar", 1.5),
+                    LandmarkSuggestion(f"{city} Fort", "landmark", "Historic fort or citadel", 1.5),
+                    LandmarkSuggestion(f"{city} Palace", "palace", "Royal palace", 1.5),
+                    LandmarkSuggestion(f"{city} Caravanserai", "landmark", "Historic caravanserai", 1.0),
+                    LandmarkSuggestion(f"Central Square {city}", "square", "Central square", 0.5),
+                ]
+            elif is_americas:
+                region_specific = [
+                    LandmarkSuggestion(f"{city} Cathedral", "church", "Historic cathedral"),
+                    LandmarkSuggestion(f"{city} Plaza", "square", "Central plaza", 0.5),
+                    LandmarkSuggestion(f"{city} Market Hall", "market", "Historic market", 1.0),
+                    LandmarkSuggestion(f"{city} Capitol", "landmark", "Government building", 0.5),
+                    LandmarkSuggestion(f"{city} Botanical Garden", "park", "Botanical garden", 1.5),
+                    LandmarkSuggestion(f"{city} Harbor", "viewpoint", "Historic harbor", 1.0),
+                ]
+            else:
+                # Europe / Africa / default
+                region_specific = [
+                    LandmarkSuggestion(f"{city} Cathedral", "church", "Historic cathedral"),
+                    LandmarkSuggestion(f"{city} Castle", "landmark", "Historic castle", 1.5),
+                    LandmarkSuggestion(f"Central Square {city}", "square", "Central square", 0.5),
+                    LandmarkSuggestion(f"{city} Opera House", "landmark", "Opera house", 1.0),
+                    LandmarkSuggestion(f"{city} Botanical Garden", "park", "Botanical garden", 1.5),
+                    LandmarkSuggestion(f"{city} Market", "market", "Local market", 1.0),
+                ]
+        else:
+            # No coordinates — use a broad mix
+            region_specific = [
+                LandmarkSuggestion(f"{city} Cathedral", "church", "Historic cathedral"),
+                LandmarkSuggestion(f"{city} Castle", "landmark", "Historic castle", 1.5),
+                LandmarkSuggestion(f"{city} Temple", "church", "Historic temple", 1.0),
+                LandmarkSuggestion(f"Central Square {city}", "square", "Central square", 0.5),
+                LandmarkSuggestion(f"{city} Market", "market", "Local market", 1.0),
+                LandmarkSuggestion(f"{city} Botanical Garden", "park", "Botanical garden", 1.5),
+            ]
+
+        return universal + region_specific
 
     # ── Shared implementations ────────────────────────────────────────
 
@@ -171,6 +293,8 @@ class AIReasoningService(ABC):
         interests: list[str] | None,
         transport_mode: str = "walking",
         time_constraint: str | None = None,
+        city_lat: float | None = None,
+        city_lng: float | None = None,
     ) -> list[LandmarkSuggestion]:
         city = self._sanitize_input(city, max_length=100)
         interests_str = ", ".join(
@@ -181,21 +305,32 @@ class AIReasoningService(ABC):
         prompt = (
             f"Suggest {n} places to visit in {city}.\n\n"
             f"Interests: {interests_str}\nTransport: {transport_mode}\n\n"
-            f"Mix famous landmarks with hidden gems that only locals know about.\n"
-            f"Include at least 30% lesser-known spots (quiet courtyards, "
-            f"local-favorite viewpoints, neighborhood secrets).\n\n"
+            f"IMPORTANT: Start with ALL the famous must-see landmarks, monuments, "
+            f"museums, and iconic attractions. Do NOT skip any world-famous site.\n"
+            f"Include DIVERSE types: viewpoints, hilltops, famous bridges, "
+            f"river/lake promenades, parks, gardens, markets, and anything "
+            f"unique to {city} (thermal baths, ruin bars, catacombs, canals, "
+            f"hammams, shrines, etc.).\n"
+            f"After listing every major attraction, add hidden gems that locals love "
+            f"(about 30% of the total).\n\n"
             f"Return ONLY a JSON array:\n"
             f'[{{"name": "Place Name", "category": "landmark|church|museum|park|'
-            f'palace|square|market|viewpoint|hidden_gem", "why_visit": "One sentence", '
-            f'"visit_duration_hours": 1.5}}]\n\n'
-            f"Rules:\n- Only places WITHIN {city} city limits\n"
+            f'palace|square|market|viewpoint|bridge|bath|hidden_gem", '
+            f'"why_visit": "One sentence", '
+            f'"visit_duration_hours": 1.5, '
+            f'"admission": "free" or "~15 EUR" or "~25 USD" or null if unknown, '
+            f'"admission_url": "official ticket website URL or null"}}]\n\n'
+            f"Rules:\n- ONLY places WITHIN {city} city limits (max 30km from center)\n"
+            f"- Do NOT suggest places in other cities or countries\n"
             f"- Use simple, searchable names (no \"The\", no parentheses)\n"
-            f"- Start with most famous, then weave in hidden gems\n"
+            f"- Start with the most famous attractions first\n"
+            f"- Include ALL world-famous landmarks — do not skip any\n"
+            f"- For paid attractions, include approximate ticket price\n"
             f"- No coordinates or addresses"
         )
 
         try:
-            text = await self._generate(prompt, timeout=20.0)
+            text = await self._generate(prompt, timeout=45.0)
             data = json.loads(self._extract_json(text))
             suggestions: list[LandmarkSuggestion] = []
             seen: set[str] = set()
@@ -212,16 +347,18 @@ class AIReasoningService(ABC):
                     category=item.get("category", "attraction"),
                     why_visit=item.get("why_visit", ""),
                     visit_duration_hours=dur,
+                    admission=item.get("admission") or None,
+                    admission_url=item.get("admission_url") or None,
                 ))
                 seen.add(name.lower())
             logger.info(f"[{self.provider_name}] Got {len(suggestions)} landmark suggestions")
             return suggestions
         except asyncio.TimeoutError:
             logger.info(f"[{self.provider_name}] Timeout getting landmarks for {city}")
-            return self._get_fallback_landmarks(city)
+            return self._get_fallback_landmarks(city, city_lat, city_lng)
         except Exception as e:
             logger.info(f"[{self.provider_name}] Landmark suggestion error: {e}")
-            return self._get_fallback_landmarks(city)
+            return self._get_fallback_landmarks(city, city_lat, city_lng)
 
     async def rank_pois(self, pois: list[POI], interests: list[str]) -> list[RankedPOI]:
         if not pois:

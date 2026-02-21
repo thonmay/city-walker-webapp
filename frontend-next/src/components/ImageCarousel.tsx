@@ -82,8 +82,15 @@ export function ImageCarousel({ images, alt, className = '', onImageLoad }: Imag
 
   if (!images.length) {
     return (
-      <div className={`flex items-center justify-center ${className}`} style={{ background: 'linear-gradient(135deg, var(--parchment-warm), var(--mist))' }}>
-        <span className="text-4xl">📍</span>
+      <div className={`flex items-center justify-center ${className}`} style={{ background: 'linear-gradient(145deg, #2a2a4a, #1a1a2e)' }}>
+        <div className="flex flex-col items-center gap-1.5 opacity-60">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="3" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="M21 15L16 10L5 21" />
+          </svg>
+          <span className="text-[10px] tracking-wider uppercase" style={{ color: 'rgba(255,255,255,0.35)' }}>No image</span>
+        </div>
       </div>
     );
   }
@@ -117,9 +124,16 @@ export function ImageCarousel({ images, alt, className = '', onImageLoad }: Imag
             {failedImages.has(idx) ? (
               <div
                 className="absolute inset-0 flex items-center justify-center"
-                style={{ background: 'linear-gradient(135deg, var(--parchment-warm), var(--mist))' }}
+                style={{ background: 'linear-gradient(145deg, #2a2a4a, #1a1a2e)' }}
               >
-                <span className="text-5xl opacity-80">🏛️</span>
+                <div className="flex flex-col items-center gap-1.5 opacity-60">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth="1.5">
+                    <rect x="3" y="3" width="18" height="18" rx="3" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15L16 10L5 21" />
+                  </svg>
+                  <span className="text-[10px] tracking-wider uppercase" style={{ color: 'rgba(255,255,255,0.3)' }}>Image unavailable</span>
+                </div>
               </div>
             ) : (
               <>

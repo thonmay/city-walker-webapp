@@ -15,8 +15,10 @@ from typing import Optional
 from uuid import uuid4
 from datetime import datetime
 from urllib.parse import quote_plus
+import asyncio
 import logging
 import math
+import time as time_module
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -36,8 +38,8 @@ from app.models import (
     Route,
 )
 from app.services import (
-    GooglePlaceValidatorService,
-    GoogleRouteOptimizerService,
+    OpenStreetMapValidatorService,
+    OSRMRouteOptimizerService,
     RedisCacheService,
     CacheService,
     create_ai_service,
@@ -57,16 +59,18 @@ from app.utils.cache import LRUCache
 _discover_cache = LRUCache(max_size=100, ttl_seconds=86400)  # 24h TTL
 
 
-def _discover_cache_key(city: str, limit: int, interests: list[str] | None = None) -> str:
+def _discover_cache_key(city: str, limit: int, interests: list[str] | None = None, transport_mode: str | None = None) -> str:
     """Build a normalized cache key for discover responses."""
     city_norm = city.strip().lower()
     interest_str = ",".join(sorted(interests)) if interests else "default"
-    return f"discover:{city_norm}:{limit}:{interest_str}"
+    mode = (transport_mode or "walking").lower()
+    return f"discover:{city_norm}:{limit}:{interest_str}:{mode}"
 
 
-def _food_cache_key(city: str, category: str, limit: int) -> str:
+def _food_cache_key(city: str, category: str, limit: int, transport_mode: str | None = None) -> str:
     """Build a normalized cache key for food discover responses."""
-    return f"discover_food:{city.strip().lower()}:{category}:{limit}"
+    mode = (transport_mode or "walking").lower()
+    return f"discover_food:{city.strip().lower()}:{category}:{limit}:{mode}"
 
 
 async def _redis_get_discover(key: str) -> dict | None:
@@ -101,6 +105,24 @@ def get_num_days(time_constraint: TimeConstraint | None) -> int:
     return mapping.get(time_constraint, 1)
 
 
+def get_max_radius_km(transport_mode: str | None) -> float:
+    """Return the POI search radius based on transport mode.
+
+    Walking tourists realistically cover ~15km in a day, so a tighter
+    radius keeps results walkable.  Driving/transit users can reach
+    further-out attractions.
+
+    Args:
+        transport_mode: One of 'walking', 'driving', 'transit', or None.
+
+    Returns:
+        Maximum distance in kilometres from the city centre.
+    """
+    if transport_mode and transport_mode.lower() in ("driving", "transit"):
+        return 30.0
+    return 15.0
+
+
 def organize_pois_into_days(
     pois: list[POI], 
     num_days: int,
@@ -123,12 +145,10 @@ def organize_pois_into_days(
     
     Key constraints:
     - Min 3 POIs per day (otherwise feels empty)
-    - Max 10 POIs per day (hard cap - more is exhausting)
+    - Max 50 POIs per day (user wants maximum exploration options)
     - Target ~6-8 hours of visit time per day
     """
-    import math
-    
-    MAX_POIS_PER_DAY = 10
+    MAX_POIS_PER_DAY = 15
     MIN_POIS_PER_DAY = 3
     
     if not pois:
@@ -433,8 +453,6 @@ async def geocode_address(address: str, city: str) -> POI | None:
     
     Returns a POI representing the starting location, or None if not found.
     """
-    import asyncio
-    
     async with httpx.AsyncClient(
         timeout=8.0,  # Shorter timeout since we have fallbacks
         headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
@@ -578,10 +596,9 @@ from app.services.ai_reasoning import AIReasoningService
 _ai_service: AIReasoningService | None = None
 _osm_service: OSMOverpassService | None = None
 _wikipedia_service: WikipediaService | None = None
-_route_service: GoogleRouteOptimizerService | None = None
+_route_service: OSRMRouteOptimizerService | None = None
 _cache_service: RedisCacheService | None = None
-# Legacy - kept for fallback
-_place_service: GooglePlaceValidatorService | None = None
+_place_service: OpenStreetMapValidatorService | None = None
 
 
 def get_ai_service() -> AIReasoningService:
@@ -605,7 +622,7 @@ def get_wikipedia_service() -> WikipediaService:
     return _wikipedia_service
 
 
-def get_place_service() -> GooglePlaceValidatorService:
+def get_place_service() -> OpenStreetMapValidatorService:
     global _place_service
     if _place_service is None:
         from app.services.place_validator import OpenStreetMapValidatorService
@@ -613,7 +630,7 @@ def get_place_service() -> GooglePlaceValidatorService:
     return _place_service
 
 
-def get_route_service() -> GoogleRouteOptimizerService:
+def get_route_service() -> OSRMRouteOptimizerService:
     global _route_service
     if _route_service is None:
         from app.services.route_optimizer import OSRMRouteOptimizerService
@@ -766,15 +783,15 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
         # 6. AI ranks POIs by relevance to user interests (if mixed sources)
         # Determine max POIs based on time constraint FIRST
         max_pois_by_time = {
-            "6h": 6,
-            "day": 10,
-            "2days": 20,   # 10 per day
-            "3days": 30,   # 10 per day
-            "5days": 50,   # 10 per day
+            "6h": 25,
+            "day": 30,
+            "2days": 40,
+            "3days": 50,
+            "5days": 50,
         }
         max_pois = max_pois_by_time.get(
             request.time_available.value if request.time_available else "", 
-            10
+            30
         )
         
         if request.interests and len(pois) > max_pois:
@@ -800,7 +817,6 @@ async def create_itinerary(request: CreateItineraryRequest) -> CreateItineraryRe
                 pass  # Image enrichment is optional
             return poi
         
-        import asyncio
         # Enrich all POIs, not just first 8
         enriched_pois = await asyncio.gather(*[enrich_with_image(p) for p in pois])
         pois = list(enriched_pois)
@@ -1091,8 +1107,6 @@ async def batch_geocode_places(request: BatchGeocodeRequest) -> BatchGeocodeResp
     Used by the frontend to geocode all AI-suggested places at once.
     Returns results in the same order as input, with coordinates added.
     """
-    import asyncio
-    
     async def geocode_single(place: dict) -> dict:
         """Geocode a single place and return with coordinates."""
         name = place.get("name", "")
@@ -1205,13 +1219,43 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
     
     Used by the frontend to get rich POI data for AI-suggested places.
     """
-    import asyncio
-    
     place_service = get_place_service()
     wikipedia_service = get_wikipedia_service()
     
+    # Get city center for distance filtering
+    city_center = None
+    MAX_DISTANCE_KM = 30.0
+    try:
+        async with httpx.AsyncClient(
+            timeout=8.0,
+            headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
+        ) as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": request.city, "format": "json", "limit": 1, "featuretype": "city"},
+            )
+            resp.raise_for_status()
+            city_results = resp.json()
+            if city_results:
+                city_center = {
+                    "lat": float(city_results[0]["lat"]),
+                    "lng": float(city_results[0]["lon"]),
+                }
+    except Exception:
+        pass  # Proceed without distance filtering
+    
     async def lookup_single_place(place: dict) -> dict | None:
-        """Look up a single place and return full POI data."""
+        """Look up a single place and return full POI data.
+
+        Geocodes via Nominatim, fetches Wikipedia images, and validates
+        the result is within MAX_DISTANCE_KM of the city center.
+
+        Args:
+            place: Dict with 'name', 'type', 'whyVisit', 'estimatedMinutes'.
+
+        Returns:
+            A POI dict or None if geocoding fails or result is too far.
+        """
         name = place.get("name", "")
         place_type = place.get("type", "landmark")
         why_visit = place.get("whyVisit", "")
@@ -1259,6 +1303,16 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
             if not coords:
                 return None
             
+            # Distance check — reject results too far from city center
+            if city_center:
+                dist = haversine_distance(
+                    city_center["lat"], city_center["lng"],
+                    coords["lat"], coords["lng"],
+                )
+                if dist > MAX_DISTANCE_KM:
+                    logger.info(f"[LOOKUP] Rejected {name}: {dist:.1f}km from center (>{MAX_DISTANCE_KM}km)")
+                    return None
+            
             # 2. Get Wikipedia image
             image_url = None
             try:
@@ -1291,6 +1345,8 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
                 "types": [place_type],
                 "visit_duration_minutes": estimated_minutes,
                 "why_visit": why_visit,
+                "admission": place.get("admission"),
+                "admission_url": place.get("admissionUrl") or place.get("admission_url"),
             }
             
         except Exception as e:
@@ -1326,8 +1382,9 @@ class DiscoverRequest(BaseModel):
     """Request model for discovering POIs in a city."""
     city: str = Field(..., min_length=1, description="City to explore")
     interests: Optional[list[str]] = Field(default=None, description="Optional interests filter")
-    limit: int = Field(default=18, ge=5, le=50, description="Number of POIs to return")
+    limit: int = Field(default=25, ge=5, le=50, description="Number of POIs to return")
     include_food: bool = Field(default=False, description="Also include famous cafes/restaurants")
+    transport_mode: Optional[str] = Field(default="walking", description="Transport mode: walking, driving, transit")
 
 
 class DiscoverResponse(BaseModel):
@@ -1351,13 +1408,10 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
     
     Cache TTL: 24h. Landmarks don't change daily.
     """
-    import asyncio
-    import time as time_module
-    
     total_start = time_module.time()
     
     # ─── Layer 1: In-memory LRU cache (instant) ───
-    cache_key = _discover_cache_key(request.city, request.limit, request.interests)
+    cache_key = _discover_cache_key(request.city, request.limit, request.interests, request.transport_mode)
     cached = _discover_cache.get(cache_key)
     if cached:
         elapsed = time_module.time() - total_start
@@ -1432,6 +1486,8 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             request.interests,
             transport_mode="walking",
             time_constraint=None,
+            city_lat=city_center["lat"],
+            city_lng=city_center["lng"],
         )
         
         # Limit to requested amount
@@ -1448,12 +1504,33 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             )
         
         # 3. Geocode and enrich all places in parallel
-        # Define max radius for POI filtering (30km from city center)
-        MAX_DISTANCE_KM = 30.0
+        # Dynamic radius: 15km for walking, 30km for driving/transit
+        MAX_DISTANCE_KM = get_max_radius_km(request.transport_mode)
+        logger.info(f"[DISCOVER] Using {MAX_DISTANCE_KM}km radius for {request.transport_mode or 'walking'} mode")
+        
+        async def _validate_url(url: str | None) -> str | None:
+            """Validate an admission URL with a quick HEAD request.
+
+            Args:
+                url: URL to validate, or None.
+
+            Returns:
+                The original URL if it responds with a 2xx/3xx status, None otherwise.
+            """
+            if not url or not url.startswith("http"):
+                return None
+            try:
+                async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                    resp = await client.head(url)
+                    return url if resp.status_code < 400 else None
+            except httpx.HTTPError:
+                return None
+            except Exception as exc:
+                logger.debug(f"[DISCOVER] URL validation failed for {url}: {exc}")
+                return None
         
         # Create shared HTTP client for all geocoding requests
-        import time
-        start_enrich = time.time()
+        start_enrich = time_module.time()
         
         async with httpx.AsyncClient(
             timeout=8.0,  # Reduced timeout
@@ -1461,26 +1538,39 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
         ) as shared_client:
             
             async def enrich_place(suggestion) -> dict | None:
-                """Geocode a place and fetch its image with distance validation."""
+                """Geocode a place and enrich with images, validating distance from city center.
+
+                Uses Nominatim as primary geocoder with Photon (Komoot) as fallback
+                for better multilingual and fuzzy matching support.
+
+                Args:
+                    suggestion: A ``LandmarkSuggestion`` dataclass from the AI service.
+
+                Returns:
+                    A POI dict ready for the API response, or None if geocoding fails.
+                """
                 name = suggestion.name
-                place_type = suggestion.category if hasattr(suggestion, 'category') else "landmark"
-                why_visit = suggestion.why_visit if hasattr(suggestion, 'why_visit') else ""
-                visit_duration = suggestion.visit_duration_hours if hasattr(suggestion, 'visit_duration_hours') else 1.0
+                place_type = getattr(suggestion, 'category', 'landmark')
+                why_visit = getattr(suggestion, 'why_visit', '')
+                visit_duration = getattr(suggestion, 'visit_duration_hours', 1.0)
                 estimated_minutes = int(visit_duration * 60)
+                admission = getattr(suggestion, 'admission', None)
+                admission_url = getattr(suggestion, 'admission_url', None)
                 
                 try:
-                    # Geocode with bounded search around city center
+                    # Geocode with Nominatim first, Photon fallback
                     query = f"{name}, {request.city}"
                     coords = None
                     address = None
                     opening_hours_text = None
                     
-                    # Calculate viewbox (bounding box) around city center (~50km)
-                    lat_offset = 0.5  # ~55km
-                    lng_offset = 0.5 / math.cos(math.radians(city_center["lat"]))
+                    # Calculate viewbox (bounding box) around city center
+                    # 1 degree latitude ≈ 111km, so offset = radius_km / 111
+                    lat_offset = MAX_DISTANCE_KM / 111.0
+                    lng_offset = lat_offset / max(0.1, math.cos(math.radians(city_center["lat"])))
                     viewbox = f"{city_center['lng']-lng_offset},{city_center['lat']+lat_offset},{city_center['lng']+lng_offset},{city_center['lat']-lat_offset}"
                     
-                    # Geocode using shared client
+                    # --- Attempt 1: Nominatim (precise, has extratags) ---
                     response = await shared_client.get(
                         "https://nominatim.openstreetmap.org/search",
                         params={
@@ -1520,24 +1610,74 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                         address = best_result.get("display_name", "")
                         extratags = best_result.get("extratags", {})
                         opening_hours_text = extratags.get("opening_hours")
-                        logger.info(f"[DISCOVER] Geocoded {name}: {best_distance:.1f}km from center")
-                    else:
-                        logger.info(f"[DISCOVER] No results within {MAX_DISTANCE_KM}km for: {name}")
+                        logger.info(f"[DISCOVER] Geocoded {name} via Nominatim: {best_distance:.1f}km from center")
+                    
+                    # --- Attempt 2: Photon fallback (fuzzy, multilingual) ---
+                    if not coords:
+                        logger.info(f"[DISCOVER] Nominatim miss for {name}, trying Photon...")
+                        try:
+                            photon_resp = await shared_client.get(
+                                "https://photon.komoot.io/api/",
+                                params={"q": query, "limit": 5},
+                            )
+                            photon_resp.raise_for_status()
+                            features = photon_resp.json().get("features", [])
+                            
+                            # Find closest feature within radius
+                            for feature in features:
+                                fc = feature["geometry"]["coordinates"]
+                                f_lat, f_lng = fc[1], fc[0]
+                                dist = haversine_distance(
+                                    city_center["lat"], city_center["lng"],
+                                    f_lat, f_lng,
+                                )
+                                if dist < MAX_DISTANCE_KM and dist < best_distance:
+                                    best_distance = dist
+                                    coords = {"lat": f_lat, "lng": f_lng}
+                                    props = feature.get("properties", {})
+                                    address = f"{props.get('name', name)}, {props.get('city', request.city)}"
+                                    logger.info(f"[DISCOVER] Geocoded {name} via Photon: {dist:.1f}km from center")
+                                    break
+                        except Exception as photon_err:
+                            logger.info(f"[DISCOVER] Photon also failed for {name}: {photon_err}")
                     
                     if not coords:
+                        logger.info(f"[DISCOVER] No results from either geocoder for: {name}")
                         return None
                     
-                    # Get images with a hard timeout — don't let image fetching block POI delivery
+                    # Final distance validation — reject anything beyond 30km
+                    final_dist = haversine_distance(
+                        city_center["lat"], city_center["lng"],
+                        coords["lat"], coords["lng"],
+                    )
+                    if final_dist > MAX_DISTANCE_KM:
+                        logger.info(f"[DISCOVER] Rejected {name}: {final_dist:.1f}km from center (>{MAX_DISTANCE_KM}km)")
+                        return None
+                    
+                    # Fetch images + validate admission URL concurrently
+                    # Neither blocks the other — both are best-effort
                     images: list[str] = []
-                    try:
-                        images = await asyncio.wait_for(
-                            wikipedia_service.get_images_for_landmark(name, request.city, count=3),
-                            timeout=10.0,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.info(f"[DISCOVER] Image fetch timed out for {name}")
-                    except Exception:
-                        pass  # Images are best-effort
+                    validated_admission_url = None
+                    
+                    async def _fetch_images() -> list[str]:
+                        try:
+                            return await asyncio.wait_for(
+                                wikipedia_service.get_images_for_landmark(name, request.city, count=3),
+                                timeout=10.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.info(f"[DISCOVER] Image fetch timed out for {name}")
+                            return []
+                        except Exception as img_err:
+                            logger.debug(f"[DISCOVER] Image fetch failed for {name}: {img_err}")
+                            return []
+                    
+                    img_result, url_result = await asyncio.gather(
+                        _fetch_images(),
+                        _validate_url(admission_url),
+                    )
+                    images = img_result
+                    validated_admission_url = url_result
                     
                     # Build POI
                     maps_url = f"https://www.google.com/maps/search/?api=1&query={quote_plus(name + ', ' + request.city)}"
@@ -1563,6 +1703,8 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                         "types": [place_type],
                         "visit_duration_minutes": estimated_minutes,
                         "why_visit": why_visit,
+                        "admission": admission,
+                        "admission_url": validated_admission_url,
                     }
                     
                 except Exception as e:
@@ -1584,12 +1726,11 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             
             # Filter out failures
             pois = [p for p in enriched if p is not None]
-            elapsed = time.time() - start_enrich
+            elapsed = time_module.time() - start_enrich
             logger.info(f"[DISCOVER] Successfully enriched {len(pois)} POIs in {elapsed:.1f}s")
         
-        # ─── Cache the result (both layers) ───
+        # ─── Cache the result (both layers) — skip caching empty results ───
         total_elapsed = time_module.time() - total_start
-        logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — caching for next time")
         
         response_dict = {
             "success": True,
@@ -1597,8 +1738,13 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             "city_center": city_center,
             "pois": pois,
         }
-        _discover_cache.set(cache_key, response_dict)
-        await _redis_set_discover(cache_key, response_dict, ttl=86400)
+        
+        if pois:
+            logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — caching {len(pois)} POIs")
+            _discover_cache.set(cache_key, response_dict)
+            await _redis_set_discover(cache_key, response_dict, ttl=86400)
+        else:
+            logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — 0 POIs, NOT caching")
         
         return DiscoverResponse(**response_dict)
         
@@ -1648,8 +1794,8 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
         )
     
     # Dynamic POI limit based on trip duration
-    # For multi-day trips, allow up to 10 POIs per day
-    max_pois = 10 * request.num_days
+    # Single day: max 10 POIs, multi-day: max 30 total
+    max_pois = 10 if request.num_days == 1 else 30
     if len(request.pois) > max_pois:
         return CreateRouteFromSelectionResponse(
             success=False,
@@ -1682,6 +1828,8 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
                 types=p.get("types", ["landmark"]),
                 visit_duration_minutes=p.get("visit_duration_minutes", 60),
                 why_visit=p.get("why_visit"),
+                admission=p.get("admission"),
+                admission_url=p.get("admission_url"),
             )
             pois.append(poi)
         
@@ -1819,6 +1967,7 @@ class DiscoverFoodRequest(BaseModel):
     city: str = Field(..., min_length=1, description="City to explore")
     category: str = Field(default="cafes", description="Category: cafes, restaurants, bars, parks")
     limit: int = Field(default=10, ge=3, le=20, description="Number of places to return")
+    transport_mode: Optional[str] = Field(default="walking", description="Transport mode: walking, driving, transit")
 
 
 class DiscoverFoodResponse(BaseModel):
@@ -1838,13 +1987,10 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
     Multi-layer caching (same as /discover):
     1. In-memory LRU → 2. Redis → 3. Full pipeline
     """
-    import asyncio
-    import time as time_module
-    
     start_time = time_module.time()
     
     # ─── Cache check ───
-    cache_key = _food_cache_key(request.city, request.category, request.limit)
+    cache_key = _food_cache_key(request.city, request.category, request.limit, request.transport_mode)
     cached = _discover_cache.get(cache_key)
     if cached:
         elapsed = time_module.time() - start_time
@@ -1874,6 +2020,29 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
         }
         category = category_map.get(category, "cafes")
         
+        # Get city center for distance filtering
+        city_center = None
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
+        ) as client:
+            try:
+                response = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": request.city, "format": "json", "limit": 1, "featuretype": "city"},
+                )
+                response.raise_for_status()
+                results = response.json()
+                if results:
+                    city_center = {
+                        "lat": float(results[0]["lat"]),
+                        "lng": float(results[0]["lon"]),
+                    }
+            except Exception as geo_err:
+                logger.info(f"[FOOD] Could not geocode city center: {geo_err}")
+        
+        MAX_DISTANCE_KM = get_max_radius_km(request.transport_mode)
+        
         # Get AI suggestions for famous places
         logger.info(f"[FOOD] Getting AI suggestions for famous {category}...")
         ai_suggestions = await ai_service.suggest_food_and_drinks(
@@ -1894,37 +2063,116 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
         
         logger.info(f"[FOOD] Got {len(ai_suggestions)} AI suggestions, geocoding via Nominatim...")
         
-        # Geocode AI suggestions via Nominatim (fast, no rate limits)
+        # Geocode AI suggestions: Nominatim first, Photon fallback
         async def geocode_suggestion(suggestion) -> dict | None:
-            """Geocode a single AI suggestion via Nominatim."""
+            """Geocode a single AI food/drink suggestion via Nominatim + Photon fallback.
+
+            Filters results to within MAX_DISTANCE_KM of city center to prevent
+            cross-city/cross-country matches.
+
+            Args:
+                suggestion: A ``LandmarkSuggestion`` from the AI service.
+
+            Returns:
+                A POI dict with coordinates and metadata, or None if geocoding
+                fails or the result is too far from the city center.
+            """
             try:
                 query = f"{suggestion.name}, {request.city}"
+                lat: float | None = None
+                lng: float | None = None
+                address: str = request.city
+                
                 async with httpx.AsyncClient(
                     timeout=8.0,
                     headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
                 ) as client:
+                    # --- Attempt 1: Nominatim ---
                     response = await client.get(
                         "https://nominatim.openstreetmap.org/search",
                         params={
                             "q": query,
                             "format": "json",
-                            "limit": 1,
+                            "limit": 5,
                             "addressdetails": 1,
                         },
                     )
                     response.raise_for_status()
                     results = response.json()
                     
-                    if not results:
-                        logger.info(f"[FOOD] Not found: {suggestion.name}")
+                    # Find closest result within radius
+                    best_distance = float('inf')
+                    if results and city_center:
+                        for result in results:
+                            r_lat = float(result["lat"])
+                            r_lng = float(result["lon"])
+                            dist = haversine_distance(
+                                city_center["lat"], city_center["lng"],
+                                r_lat, r_lng,
+                            )
+                            if dist < MAX_DISTANCE_KM and dist < best_distance:
+                                best_distance = dist
+                                lat, lng = r_lat, r_lng
+                                address = result.get("display_name", request.city)
+                                logger.info(f"[FOOD] Found via Nominatim: {suggestion.name} ({dist:.1f}km from center)")
+                    elif results:
+                        # No city center — use first result
+                        lat = float(results[0]["lat"])
+                        lng = float(results[0]["lon"])
+                        address = results[0].get("display_name", request.city)
+                    
+                    # --- Attempt 2: Photon fallback ---
+                    if lat is None:
+                        logger.info(f"[FOOD] Nominatim miss for {suggestion.name}, trying Photon...")
+                        photon_resp = await client.get(
+                            "https://photon.komoot.io/api/",
+                            params={"q": query, "limit": 5},
+                        )
+                        photon_resp.raise_for_status()
+                        features = photon_resp.json().get("features", [])
+                        
+                        best_distance = float('inf')
+                        for feat in features:
+                            fc = feat["geometry"]["coordinates"]
+                            f_lat, f_lng = fc[1], fc[0]
+                            if city_center:
+                                dist = haversine_distance(
+                                    city_center["lat"], city_center["lng"],
+                                    f_lat, f_lng,
+                                )
+                                if dist < MAX_DISTANCE_KM and dist < best_distance:
+                                    best_distance = dist
+                                    lat, lng = f_lat, f_lng
+                                    props = feat.get("properties", {})
+                                    address = f"{props.get('name', suggestion.name)}, {props.get('city', request.city)}"
+                                    logger.info(f"[FOOD] Found via Photon: {suggestion.name} ({dist:.1f}km from center)")
+                            else:
+                                # No city center — prefer results matching city name
+                                props = feat.get("properties", {})
+                                feat_city = (props.get("city") or props.get("locality") or "").lower()
+                                if request.city.lower() in feat_city or feat_city in request.city.lower():
+                                    lat, lng = f_lat, f_lng
+                                    address = f"{props.get('name', suggestion.name)}, {props.get('city', request.city)}"
+                                    break
+                        
+                        if lat is None and features and not city_center:
+                            fc = features[0]["geometry"]["coordinates"]
+                            lat, lng = fc[1], fc[0]
+                            props = features[0].get("properties", {})
+                            address = f"{props.get('name', suggestion.name)}, {props.get('city', request.city)}"
+                    
+                    if lat is None or lng is None:
+                        logger.info(f"[FOOD] Not found on either geocoder: {suggestion.name}")
                         return None
                     
-                    result = results[0]
-                    lat = float(result["lat"])
-                    lng = float(result["lon"])
-                    address = result.get("display_name", request.city)
-                    
-                    logger.info(f"[FOOD] Found: {suggestion.name} at ({lat:.4f}, {lng:.4f})")
+                    # Final distance check — reject anything beyond 30km
+                    if city_center:
+                        final_dist = haversine_distance(
+                            city_center["lat"], city_center["lng"], lat, lng,
+                        )
+                        if final_dist > MAX_DISTANCE_KM:
+                            logger.info(f"[FOOD] Rejected {suggestion.name}: {final_dist:.1f}km from center (>{MAX_DISTANCE_KM}km)")
+                            return None
                     
                     return {
                         "place_id": f"food_{suggestion.name.lower().replace(' ', '_')}_{hash(suggestion.name) % 10000}",
@@ -1940,6 +2188,8 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
                         "visit_duration_minutes": int(suggestion.visit_duration_hours * 60),
                         "why_visit": suggestion.why_visit,
                         "specialty": suggestion.specialty,
+                        "admission": None,
+                        "admission_url": None,
                     }
             except Exception as e:
                 logger.info(f"[FOOD] Error geocoding {suggestion.name}: {e}")
@@ -1980,17 +2230,21 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
             pois = list(enriched)
         
         elapsed = time_module.time() - start_time
-        logger.info(f"[FOOD] Completed in {elapsed:.1f}s: {len(pois)} POIs — caching")
         
         response_dict = {
             "success": True,
             "city": request.city,
             "category": category,
             "pois": pois,
-            "validation_stats": {"method": "ai_nominatim", "count": len(pois), "elapsed_seconds": round(elapsed, 1)},
+            "validation_stats": {"method": "ai_nominatim_photon", "count": len(pois), "elapsed_seconds": round(elapsed, 1)},
         }
-        _discover_cache.set(cache_key, response_dict)
-        await _redis_set_discover(cache_key, response_dict, ttl=86400)
+        
+        if pois:
+            logger.info(f"[FOOD] Completed in {elapsed:.1f}s: {len(pois)} POIs — caching")
+            _discover_cache.set(cache_key, response_dict)
+            await _redis_set_discover(cache_key, response_dict, ttl=86400)
+        else:
+            logger.info(f"[FOOD] Completed in {elapsed:.1f}s: 0 POIs — NOT caching")
         
         return DiscoverFoodResponse(**response_dict)
         

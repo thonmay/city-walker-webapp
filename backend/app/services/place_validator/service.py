@@ -377,6 +377,8 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
                         types=[suggestion.category],
                         visit_duration_minutes=int(suggestion.visit_duration_hours * 60),
                         why_visit=suggestion.why_visit,
+                        admission=getattr(suggestion, 'admission', None),
+                        admission_url=getattr(suggestion, 'admission_url', None),
                     )
                     pois.append(poi)
                     seen_names.add(suggestion.name.lower())
@@ -573,5 +575,5 @@ class OpenStreetMapValidatorService(PlaceValidatorService):
         return ValidationResult(is_valid=is_valid, missing_fields=missing_fields, poi=validated_poi)
 
 
-# Alias for backward compatibility
+# Deprecated aliases — use OpenStreetMapValidatorService directly
 GooglePlaceValidatorService = OpenStreetMapValidatorService

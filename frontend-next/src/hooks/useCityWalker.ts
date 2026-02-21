@@ -9,7 +9,7 @@ import { useState, useCallback, useRef, useMemo } from 'react';
 import type { TransportMode } from '@/components/TransportModeSelector';
 import type { HomeBase } from '@/components/HomeBaseInput';
 import { createRouteFromSelection, discoverPois, discoverFood } from '@/lib/api';
-import { DEFAULT_CENTER, MAX_SINGLE_DAY_POIS } from '@/lib/config';
+import { DEFAULT_CENTER, MAX_SINGLE_DAY_POIS, MAX_TOTAL_POIS } from '@/lib/config';
 import type { Itinerary, POI, Coordinates } from '@/types';
 
 export interface GeocodedPOI extends POI {
@@ -35,6 +35,8 @@ function toGeocodedPOI(
     visit_duration_minutes: (poi.visit_duration_minutes as number) ?? 60,
     why_visit: poi.why_visit as string | undefined,
     specialty: poi.specialty as string | undefined,
+    admission: poi.admission as string | undefined,
+    admission_url: poi.admission_url as string | undefined,
   };
 }
 
@@ -62,7 +64,8 @@ export function useCityWalker() {
 
   // --- Derived state ---
   const acceptedCount = acceptedPois.size;
-  const maxPois = tripDays > 1 ? Infinity : MAX_SINGLE_DAY_POIS;
+  const maxPois = tripDays > 1 ? MAX_TOTAL_POIS : MAX_SINGLE_DAY_POIS;
+  const limitReached = acceptedCount >= maxPois;
   const hasDiscoveredPois = discoveredPois.length > 0;
 
   const visiblePois = useMemo(
@@ -101,7 +104,15 @@ export function useCityWalker() {
   const handleAccept = useCallback(
     (poiId: string) => {
       setAcceptedPois(prev => {
-        if (prev.size >= maxPois) return prev;
+        if (prev.has(poiId)) return prev;
+        if (prev.size >= maxPois) {
+          setError(
+            tripDays > 1
+              ? `You can select up to ${maxPois} places for a multi-day trip. Remove some to add new ones.`
+              : `You can select up to ${maxPois} places for a day trip. Remove some or switch to a multi-day trip.`
+          );
+          return prev;
+        }
         const next = new Set(prev);
         next.add(poiId);
         return next;
@@ -112,9 +123,8 @@ export function useCityWalker() {
         next.delete(poiId);
         return next;
       });
-      setError(null);
     },
-    [maxPois]
+    [maxPois, tripDays]
   );
 
   const handleReject = useCallback((poiId: string) => {
@@ -212,7 +222,7 @@ export function useCityWalker() {
       const { signal } = abortControllerRef.current;
 
       try {
-        const data = await discoverPois(city, Math.max(15, tripDays * 8), signal);
+        const data = await discoverPois(city, Math.max(25, tripDays * 12), signal, transportMode);
 
         if (data.city_center) {
           setMapCenter({ lat: data.city_center.lat, lng: data.city_center.lng });
@@ -226,8 +236,8 @@ export function useCityWalker() {
 
         setStreamingProgress('Finding local favorites...');
         const [cafes, restaurants] = await Promise.all([
-          discoverFood(city, 'cafes', 5, signal),
-          discoverFood(city, 'restaurants', 5, signal),
+          discoverFood(city, 'cafes', 5, signal, transportMode),
+          discoverFood(city, 'restaurants', 5, signal, transportMode),
         ]);
 
         const existingNames = new Set(landmarkPois.map(p => p.name.toLowerCase()));
@@ -263,13 +273,25 @@ export function useCityWalker() {
       } catch (err) {
         if (err instanceof Error && err.name === 'AbortError') return;
         console.error('Discovery error:', err);
-        setError(err instanceof Error ? err.message : 'Failed to discover places');
+        const raw = err instanceof Error ? err.message : String(err);
+        // Map technical errors to user-friendly messages
+        const friendly =
+          raw.includes('fetch') || raw.includes('network') || raw.includes('Failed to fetch')
+            ? 'Network error — check your connection and try again.'
+            : raw.includes('500') || raw.includes('Server error')
+              ? 'Our server hit a snag. Please try again in a moment.'
+              : raw.includes('timeout') || raw.includes('Timeout')
+                ? 'The request took too long. Try again — it usually works on retry.'
+                : raw.includes('429') || raw.includes('rate')
+                  ? 'Too many requests. Wait a few seconds and try again.'
+                  : raw || 'Something went wrong. Please try again.';
+        setError(friendly);
       } finally {
         setIsStreaming(false);
         setStreamingProgress('');
       }
     },
-    [searchQuery, isStreaming, tripDays, fetchMissingImages]
+    [searchQuery, isStreaming, tripDays, transportMode, fetchMissingImages]
   );
 
   const handleGenerateRoute = useCallback(async () => {
@@ -290,7 +312,14 @@ export function useCityWalker() {
       setItinerary(result.itinerary);
       setSelectedPoi(null);
     } else {
-      setError(result.error ?? 'Failed to create route');
+      const raw = result.error ?? '';
+      const friendly =
+        raw.includes('fetch') || raw.includes('network')
+          ? 'Network error — check your connection and try again.'
+          : raw.includes('500')
+            ? 'Our server hit a snag. Please try again in a moment.'
+            : raw || 'Could not create route. Please try again.';
+      setError(friendly);
     }
   }, [acceptedPois, discoveredPois, transportMode, homeBase, tripDays]);
 
@@ -326,6 +355,8 @@ export function useCityWalker() {
 
     // Derived
     acceptedCount,
+    maxPois,
+    limitReached,
     hasDiscoveredPois,
     visiblePois,
     isMultiDay,

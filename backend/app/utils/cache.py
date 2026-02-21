@@ -18,6 +18,17 @@ class LRUCache:
         self._ttl = ttl_seconds
 
     def get(self, key: str) -> dict | None:
+        """Retrieve a cached value by key.
+
+        Returns None if the key is missing or the entry has expired.
+        Accessing a live entry promotes it to most-recently-used.
+
+        Args:
+            key: Cache key to look up.
+
+        Returns:
+            The cached dict, or None if not found / expired.
+        """
         if key not in self._cache:
             return None
         ts, value = self._cache[key]
@@ -28,6 +39,15 @@ class LRUCache:
         return value
 
     def set(self, key: str, value: dict) -> None:
+        """Store a value in the cache.
+
+        If the cache exceeds ``max_size``, the least-recently-used
+        entry is evicted.
+
+        Args:
+            key: Cache key.
+            value: JSON-serializable dict to cache.
+        """
         if key in self._cache:
             self._cache.move_to_end(key)
         self._cache[key] = (time.time(), value)

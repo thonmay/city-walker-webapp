@@ -91,23 +91,21 @@ class CacheService(ABC):
 
     @staticmethod
     def build_poi_key(city: str, place_id: str) -> str:
-        """Generate cache key for POI.
+        """Generate cache key for a POI.
 
-        Creates a consistent cache key format using city and place_id
-        as specified in Requirements 2.5 and 7.6.
-
-        The key format is: poi:{city_lowercase}:{place_id}
+        Creates a consistent cache key format using city and place_id.
+        The key format is: ``poi:{city_lowercase}:{place_id}``
 
         Args:
             city: The city name (will be lowercased for consistency).
-            place_id: The Google Places place_id.
+            place_id: The OSM-based place identifier (e.g. ``osm_node_12345``).
 
         Returns:
             A formatted cache key string.
 
         Example:
-            >>> CacheService.build_poi_key("Paris", "ChIJD7fiBh9u5kcRYJSMaMOCCwQ")
-            'poi:paris:ChIJD7fiBh9u5kcRYJSMaMOCCwQ'
+            >>> CacheService.build_poi_key("Paris", "osm_node_12345")
+            'poi:paris:osm_node_12345'
         """
         return f"poi:{city.lower()}:{place_id}"
 

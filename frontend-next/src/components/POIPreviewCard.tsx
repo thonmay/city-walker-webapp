@@ -17,6 +17,8 @@ interface POIPreviewCardProps {
   onReject?: () => void;
   isAccepted?: boolean;
   isRejected?: boolean;
+  limitReached?: boolean;
+  maxPois?: number;
   showActions?: boolean;
 }
 
@@ -50,12 +52,6 @@ function parseOpeningHours(hoursText: string): string[] {
   return result;
 }
 
-const placeEmojis: Record<string, string> = {
-  museum: '🏛️', cafe: '☕', landmark: '🏰', church: '⛪', park: '🌳',
-  restaurant: '🍽️', bar: '🍸', viewpoint: '👀', market: '🛒',
-  gallery: '🎨', palace: '🏰',
-};
-
 export function POIPreviewCard({
   poi,
   visitOrder,
@@ -64,17 +60,18 @@ export function POIPreviewCard({
   onReject,
   isAccepted,
   isRejected,
+  limitReached,
+  maxPois,
   showActions = false,
 }: POIPreviewCardProps) {
   const hasOpeningHours = poi.opening_hours?.weekday_text && poi.opening_hours.weekday_text.length > 0;
   const openingHoursLines = hasOpeningHours ? parseOpeningHours(poi.opening_hours!.weekday_text[0]) : [];
   const hasPhotos = poi.photos && poi.photos.length > 0;
   const photos = hasPhotos ? poi.photos! : [];
-  const placeEmoji = placeEmojis[poi.types?.[0] || 'landmark'] || '📍';
 
   return (
     <div
-      className="w-80 overflow-hidden animate-scale-in rounded-2xl"
+      className="w-full sm:w-80 overflow-hidden animate-scale-in rounded-2xl"
       style={{
         background: 'var(--parchment)',
         boxShadow: 'var(--shadow-float)',
@@ -82,15 +79,22 @@ export function POIPreviewCard({
       }}
     >
       {/* Hero Image */}
-      <div className="relative h-44 overflow-hidden" style={{ background: 'var(--mist)' }}>
+      <div className="relative h-36 sm:h-44 overflow-hidden" style={{ background: 'var(--mist)' }}>
         {hasPhotos ? (
           <ImageCarousel images={photos} alt={poi.name} className="w-full h-full" />
         ) : (
           <div
             className="w-full h-full flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, var(--parchment-warm), var(--mist))' }}
+            style={{ background: 'linear-gradient(145deg, #2a2a4a, #1a1a2e)' }}
           >
-            <span className="text-6xl">{placeEmoji}</span>
+            <div className="flex flex-col items-center gap-1.5 opacity-60">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.45)" strokeWidth="1.5">
+                <rect x="3" y="3" width="18" height="18" rx="3" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="M21 15L16 10L5 21" />
+              </svg>
+              <span className="text-[11px] tracking-wider uppercase" style={{ color: 'rgba(255,255,255,0.35)' }}>No image available</span>
+            </div>
           </div>
         )}
 
@@ -120,7 +124,7 @@ export function POIPreviewCard({
       </div>
 
       {/* Content */}
-      <div className="p-4">
+      <div className="p-3 sm:p-4">
         <div className="mb-3">
           <h3
             className="text-lg leading-tight font-semibold"
@@ -158,6 +162,43 @@ export function POIPreviewCard({
           </div>
         ) : null}
 
+        {/* Admission badge */}
+        {poi.admission ? (() => {
+          const isFree = poi.admission!.toLowerCase().includes('free');
+          const badgeStyle = {
+            background: isFree ? 'rgba(74, 124, 89, 0.1)' : 'rgba(212, 168, 83, 0.12)',
+            color: isFree ? 'var(--trail-green)' : 'var(--compass-gold-dark)',
+            border: `1px solid ${isFree ? 'rgba(74, 124, 89, 0.2)' : 'rgba(212, 168, 83, 0.25)'}`,
+          };
+          const label = isFree ? 'Free admission' : poi.admission!;
+
+          return (
+            <div className="mb-3">
+              {poi.admission_url ? (
+                <a
+                  href={poi.admission_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all hover:scale-[1.03]"
+                  style={badgeStyle}
+                >
+                  {label}
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="opacity-60">
+                    <path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </a>
+              ) : (
+                <span
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium"
+                  style={badgeStyle}
+                >
+                  {label}
+                </span>
+              )}
+            </div>
+          );
+        })() : null}
+
         {openingHoursLines.length > 0 ? (
           <div
             className="mb-4 p-3 rounded-xl"
@@ -179,28 +220,39 @@ export function POIPreviewCard({
 
         {/* Accept/Reject */}
         {showActions && !isAccepted && !isRejected ? (
-          <div className="flex gap-2 mb-3">
-            <button
-              onClick={onAccept}
-              className="flex-1 py-2.5 font-medium rounded-xl transition-all duration-200 flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
-              style={{
-                background: 'var(--trail-green)',
-                color: 'white',
-                boxShadow: '0 4px 12px -4px rgba(74, 124, 89, 0.4)',
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M3 8L6.5 11.5L13 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              Add to Trip
-            </button>
-            <button
-              onClick={onReject}
-              className="py-2.5 px-4 font-medium rounded-xl transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
-              style={{ background: 'var(--mist)', color: 'var(--ink-light)' }}
-            >
-              Skip
-            </button>
+          <div className="mb-3">
+            {limitReached ? (
+              <div
+                className="py-2.5 px-3 rounded-xl text-center text-sm font-medium"
+                style={{ background: 'rgba(212, 168, 83, 0.1)', color: 'var(--compass-gold-dark)', border: '1px solid rgba(212, 168, 83, 0.2)' }}
+              >
+                Limit reached ({maxPois} places max)
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  onClick={onAccept}
+                  className="flex-1 py-2.5 font-medium rounded-xl transition-all duration-200 flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-[0.98]"
+                  style={{
+                    background: 'var(--trail-green)',
+                    color: 'white',
+                    boxShadow: '0 4px 12px -4px rgba(74, 124, 89, 0.4)',
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M3 8L6.5 11.5L13 4.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  Add to Trip
+                </button>
+                <button
+                  onClick={onReject}
+                  className="py-2.5 px-4 font-medium rounded-xl transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
+                  style={{ background: 'var(--mist)', color: 'var(--ink-light)' }}
+                >
+                  Skip
+                </button>
+              </div>
+            )}
           </div>
         ) : null}
 

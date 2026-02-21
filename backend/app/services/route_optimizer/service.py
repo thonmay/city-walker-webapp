@@ -76,15 +76,14 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
 
     OSRM_URL = "https://router.project-osrm.org"
     
-    # Max POIs based on time constraint - up to 10 per day
     MAX_POIS_BY_TIME = {
-        "6h": 6,
-        "day": 10,
-        "2days": 20,   # 10 per day
-        "3days": 30,   # 10 per day
-        "5days": 50,   # 10 per day
+        "6h": 25,
+        "day": 30,
+        "2days": 40,
+        "3days": 50,
+        "5days": 50,
     }
-    DEFAULT_MAX_POIS = 10
+    DEFAULT_MAX_POIS = 30
 
     def __init__(self, timeout: float = 15.0) -> None:
         self._timeout = timeout
@@ -698,5 +697,5 @@ class OSRMRouteOptimizerService(RouteOptimizerService):
         return result
 
 
-# Alias for backward compatibility
+# Alias for backward compatibility — will be removed in a future version
 GoogleRouteOptimizerService = OSRMRouteOptimizerService

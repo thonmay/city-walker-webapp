@@ -27,6 +27,8 @@ export async function createRouteFromSelection(
           types: p.types,
           visit_duration_minutes: p.visit_duration_minutes,
           why_visit: p.why_visit,
+          admission: p.admission,
+          admission_url: p.admission_url,
         })),
         transport_mode: transportMode,
         starting_location: homeBase?.address,
@@ -56,12 +58,13 @@ export interface DiscoverResponse {
 export async function discoverPois(
   city: string,
   limit: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  transportMode?: string
 ): Promise<DiscoverResponse> {
   const response = await fetch(`${API_BASE_URL}/discover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ city, interests: null, limit }),
+    body: JSON.stringify({ city, interests: null, limit, transport_mode: transportMode ?? 'walking' }),
     signal,
   });
 
@@ -79,12 +82,13 @@ export async function discoverFood(
   city: string,
   category: string,
   limit: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  transportMode?: string
 ): Promise<DiscoverResponse> {
   return fetch(`${API_BASE_URL}/discover/food`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ city, category, limit }),
+    body: JSON.stringify({ city, category, limit, transport_mode: transportMode ?? 'walking' }),
     signal,
   })
     .then(r => r.json())
