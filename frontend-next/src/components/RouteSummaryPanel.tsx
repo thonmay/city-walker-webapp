@@ -36,12 +36,22 @@ interface RouteSummaryPanelProps {
   onDayChange: (day: number) => void;
 }
 
+export interface RouteSummaryPanelProps {
+  itinerary: Itinerary;
+  selectedPoi: POI | null;
+  onPoiSelect: (poi: POI | null) => void;
+  selectedDay: number;
+  onDayChange: (day: number) => void;
+  onShareClick: () => void;
+}
+
 export function RouteSummaryPanel({
   itinerary,
   selectedPoi,
   onPoiSelect,
   selectedDay,
   onDayChange,
+  onShareClick,
 }: RouteSummaryPanelProps) {
   const [isOpen, setIsOpen] = useState(true);
 
@@ -135,6 +145,20 @@ export function RouteSummaryPanel({
 
   return (
     <>
+      {/* Share Button added to RouteSummaryPanel header */}
+      <button
+        onClick={onShareClick}
+        className="absolute top-3 left-4 z-20 p-2 rounded-full glass border border-white/60 flex items-center justify-center"
+        style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.1)', background: 'var(--parchment)' }}
+        aria-label="Share itinerary"
+      >
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M10.833 8.333V3.333L16.667 6.667 10.833 10V5.833C7.012 5.833 6.5 10 4.166 10V4.167c4.695.007 5.829-4.167 5.829-4.167h0z" stroke="currentColor"/>
+          <path d="M5.834 14.167v0h0z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+          <path d="M14.167 14.167v0h0z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+        </svg>
+      </button>
+
       {/* ─── Desktop: right-side drawer ─── */}
       <div
         className="hidden sm:block absolute top-20 right-4 bottom-4 z-1000 transition-transform duration-300 ease-out"
