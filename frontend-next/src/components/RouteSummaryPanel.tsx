@@ -28,13 +28,6 @@ function RouteThumbnail({ src }: { src: string }) {
   );
 }
 
-interface RouteSummaryPanelProps {
-  itinerary: Itinerary;
-  selectedPoi: POI | null;
-  onPoiSelect: (poi: POI | null) => void;
-  selectedDay: number;
-  onDayChange: (day: number) => void;
-}
 
 export interface RouteSummaryPanelProps {
   itinerary: Itinerary;
