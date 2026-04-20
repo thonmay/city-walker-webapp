@@ -14,10 +14,11 @@
  * Business logic lives in useCityWalker hook (fullstack-developer: custom hooks).
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { POIPreviewCard } from '@/components/POIPreviewCard';
 import { RouteSummaryPanel } from '@/components/RouteSummaryPanel';
+import { ShareModal } from '@/components/ShareModal';
 import { TransportModeSelector } from '@/components/TransportModeSelector';
 import { TripDurationSelector } from '@/components/DayTabs';
 import { HomeBaseInput } from '@/components/HomeBaseInput';
@@ -104,6 +105,8 @@ export default function Home() {
     handleAccept, handleReject, handleNewTrip,
     handleSearch, handleGenerateRoute,
   } = useCityWalker();
+
+  const [shareOpen, setShareOpen] = useState(false);
 
   // --- Debug (dev only) — narrow deps to primitives (rerender-dependencies 5.3) ---
   const debugHasRoute = currentDayData?.route != null;
@@ -417,7 +420,12 @@ export default function Home() {
           onPoiSelect={setSelectedPoi}
           selectedDay={selectedDay}
           onDayChange={setSelectedDay}
+          onShareClick={() => setShareOpen(true)}
         />
+      ) : null}
+
+      {shareOpen && itinerary ? (
+        <ShareModal itinerary={itinerary} onClose={() => setShareOpen(false)} />
       ) : null}
     </div>
   );
