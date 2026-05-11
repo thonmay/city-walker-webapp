@@ -63,21 +63,34 @@ export async function discoverPois(
   signal?: AbortSignal,
   transportMode?: string
 ): Promise<DiscoverResponse> {
-  const response = await fetch(`${API_BASE_URL}/discover`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ city, interests: null, limit, transport_mode: transportMode ?? 'walking' }),
-    signal,
-  });
+  const doFetch = async () => {
+    const response = await fetch(`${API_BASE_URL}/discover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ city, interests: null, limit, transport_mode: transportMode ?? 'walking' }),
+      signal,
+    });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Server error: ${response.status}`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Server error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Discovery failed');
+    return data;
+  };
+
+  try {
+    return await doFetch();
+  } catch (err) {
+    // Auto-retry once on server errors (not aborts or client errors)
+    if (err instanceof Error && !err.name.includes('Abort') && err.message.includes('500')) {
+      await new Promise(r => setTimeout(r, 2000));
+      return await doFetch();
+    }
+    throw err;
   }
-
-  const data = await response.json();
-  if (!data.success) throw new Error(data.error || 'Discovery failed');
-  return data;
 }
 
 export async function discoverFood(

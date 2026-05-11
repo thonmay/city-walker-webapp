@@ -281,7 +281,7 @@ export function useCityWalker() {
           raw.includes('fetch') || raw.includes('network') || raw.includes('Failed to fetch')
             ? 'Network error — check your connection and try again.'
             : raw.includes('500') || raw.includes('Server error')
-              ? 'Our server hit a snag. Please try again in a moment.'
+              ? 'Discovery took too long. Tap Retry — it usually works on the second try.'
               : raw.includes('timeout') || raw.includes('Timeout')
                 ? 'The request took too long. Try again — it usually works on retry.'
                 : raw.includes('429') || raw.includes('rate')
@@ -323,7 +323,7 @@ export function useCityWalker() {
         raw.includes('fetch') || raw.includes('network')
           ? 'Network error — check your connection and try again.'
           : raw.includes('500')
-            ? 'Our server hit a snag. Please try again in a moment.'
+            ? 'Route generation failed. Try selecting fewer places or retry.'
             : raw || 'Could not create route. Please try again.';
       setError(friendly);
     }
