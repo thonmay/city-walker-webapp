@@ -400,7 +400,7 @@ async def geocode_with_maptiler(client: httpx.AsyncClient, query: str, proximity
     if not maptiler_key:
         return None
     try:
-        params = {"key": maptiler_key, "limit": 3}
+        params = {"key": maptiler_key, "limit": 3, "language": "en"}
         if proximity:
             params["proximity"] = f"{proximity[1]},{proximity[0]}"  # lng,lat
         response = await client.get(
@@ -1201,7 +1201,7 @@ async def get_city_center(city: str) -> dict:
                 try:
                     response = await client.get(
                         f"https://api.maptiler.com/geocoding/{quote_plus(city)}.json",
-                        params={"key": maptiler_key, "types": "municipality,place", "limit": 1},
+                        params={"key": maptiler_key, "language": "en", "limit": 1},
                     )
                     response.raise_for_status()
                     features = response.json().get("features", [])
@@ -1284,7 +1284,7 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
                 try:
                     resp = await client.get(
                         f"https://api.maptiler.com/geocoding/{quote_plus(request.city)}.json",
-                        params={"key": maptiler_key, "types": "municipality,place", "limit": 1},
+                        params={"key": maptiler_key, "language": "en", "limit": 1},
                     )
                     resp.raise_for_status()
                     features = resp.json().get("features", [])
@@ -1513,7 +1513,7 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                 try:
                     resp = await client.get(
                         f"https://api.maptiler.com/geocoding/{quote_plus(request.city)}.json",
-                        params={"key": maptiler_key, "types": "municipality,place", "limit": 1},
+                        params={"key": maptiler_key, "language": "en", "limit": 1},
                     )
                     resp.raise_for_status()
                     features = resp.json().get("features", [])

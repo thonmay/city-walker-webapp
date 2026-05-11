@@ -301,6 +301,13 @@ export default function Home() {
           >
             {errorIcon}
             <span className="text-xs sm:text-sm font-medium flex-1 min-w-0">{error}</span>
+            <button
+              onClick={(e) => { clearError(); handleSearch(e as unknown as React.FormEvent); }}
+              className="px-2.5 py-1 rounded-lg text-xs font-medium transition-colors shrink-0"
+              style={{ background: 'rgba(212, 101, 74, 0.12)', color: 'var(--sunset-coral)' }}
+            >
+              Retry
+            </button>
             <button onClick={clearError} className="ml-1 opacity-60 hover:opacity-100 transition-opacity shrink-0">
               {closeIcon14}
             </button>
