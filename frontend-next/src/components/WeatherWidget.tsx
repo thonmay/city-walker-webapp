@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getWeather } from '@/lib/api';
 
 interface WeatherWidgetProps {
   lat: number;
@@ -17,18 +16,38 @@ interface ForecastDay {
   is_rainy: boolean;
 }
 
+const WMO_CODES: Record<number, string> = {
+  0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+  45: 'Foggy', 48: 'Foggy', 51: 'Light drizzle', 53: 'Drizzle', 55: 'Dense drizzle',
+  61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain',
+  80: 'Rain showers', 81: 'Rain showers', 82: 'Heavy showers',
+  95: 'Thunderstorm', 96: 'Thunderstorm', 99: 'Thunderstorm',
+};
+const RAINY_CODES = new Set([51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99]);
+
 export function WeatherWidget({ lat, lng, days }: WeatherWidgetProps) {
   const [forecast, setForecast] = useState<ForecastDay[]>([]);
-  const [recommendation, setRecommendation] = useState('');
 
   useEffect(() => {
     if (!lat || !lng) return;
-    getWeather(lat, lng, Math.min(days, 7)).then(res => {
-      if (res.success && res.forecast) {
-        setForecast(res.forecast);
-        setRecommendation(res.recommendation ?? '');
-      }
-    });
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max,temperature_2m_min,weather_code&forecast_days=${Math.min(days, 7)}&timezone=auto`;
+    fetch(url)
+      .then(r => r.json())
+      .then(data => {
+        const daily = data?.daily;
+        if (!daily?.time) return;
+        setForecast(daily.time.map((date: string, i: number) => {
+          const code = daily.weather_code[i];
+          return {
+            date,
+            temp_max: daily.temperature_2m_max[i],
+            temp_min: daily.temperature_2m_min[i],
+            description: WMO_CODES[code] || 'Unknown',
+            is_rainy: RAINY_CODES.has(code),
+          };
+        }));
+      })
+      .catch(() => {});
   }, [lat, lng, days]);
 
   if (forecast.length === 0) return null;
@@ -76,14 +95,12 @@ export function WeatherWidget({ lat, lng, days }: WeatherWidgetProps) {
         ))}
       </div>
 
-      {recommendation && (
-        <p
-          className="text-[11px] mt-2 leading-tight"
-          style={{ color: hasRain ? 'var(--sky)' : 'var(--trail-green)', fontFamily: 'var(--font-body)' }}
-        >
-          {hasRain ? '☂ ' : '✓ '}{recommendation}
-        </p>
-      )}
+      <p
+        className="text-[11px] mt-2 leading-tight"
+        style={{ color: hasRain ? 'var(--sky)' : 'var(--trail-green)', fontFamily: 'var(--font-body)' }}
+      >
+        {hasRain ? '☂ Consider indoor alternatives on rainy days.' : '✓ Good weather ahead! Perfect for walking tours.'}
+      </p>
     </div>
   );
 }
