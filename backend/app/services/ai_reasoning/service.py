@@ -28,7 +28,7 @@ from app.utils.geo import haversine_distance
 logger = logging.getLogger(__name__)
 
 try:
-    load_dotenv()
+    load_dotenv(override=False)
 except Exception:
     pass  # Python 3.14+ compat
 
@@ -378,10 +378,10 @@ class AIReasoningService(ABC):
             logger.info(f"[{self.provider_name}] Got {len(suggestions)} landmark suggestions")
             return suggestions
         except asyncio.TimeoutError:
-            logger.info(f"[{self.provider_name}] Timeout getting landmarks for {city}")
+            logger.error(f"[{self.provider_name}] Timeout getting landmarks for {city}")
             return self._get_fallback_landmarks(city, city_lat, city_lng)
         except Exception as e:
-            logger.info(f"[{self.provider_name}] Landmark suggestion error: {e}")
+            logger.error(f"[{self.provider_name}] Landmark suggestion error: {e}", exc_info=True)
             return self._get_fallback_landmarks(city, city_lat, city_lng)
 
     async def rank_pois(self, pois: list[POI], interests: list[str]) -> list[RankedPOI]:
@@ -701,19 +701,19 @@ def create_ai_service() -> AIReasoningService:
         try:
             return CerebrasReasoningService()
         except Exception as e:
-            logger.info(f"[AI] Cerebras init failed: {e}")
+            logger.error(f"[AI] Cerebras init failed: {e}", exc_info=True)
 
     if os.getenv("GROQ_API_KEY"):
         try:
             return GroqReasoningService()
         except Exception as e:
-            logger.info(f"[AI] Groq init failed: {e}")
+            logger.error(f"[AI] Groq init failed: {e}", exc_info=True)
 
     if os.getenv("GEMINI_API_KEY"):
         try:
             return GeminiReasoningService()
         except Exception as e:
-            logger.info(f"[AI] Gemini init failed: {e}")
+            logger.error(f"[AI] Gemini init failed: {e}", exc_info=True)
 
     raise ValueError(
         "No AI provider available. Set CEREBRAS_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY in .env"
