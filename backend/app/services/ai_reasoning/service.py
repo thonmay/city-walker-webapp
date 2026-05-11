@@ -616,7 +616,7 @@ class GroqReasoningService(AIReasoningService):
         if not self._api_key:
             raise ValueError("GROQ_API_KEY not provided")
         self._client = AsyncGroq(api_key=self._api_key)
-        self._model_name = model_name or os.getenv("GROQ_MODEL", "llama-4-scout-17b-16e-instruct")
+        self._model_name = model_name or os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
         self._timeout = timeout_seconds
         logger.info(f"[AI] Groq ready: {self._model_name}")
 

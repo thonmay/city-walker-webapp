@@ -1572,7 +1572,12 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
         )
         
         # If primary AI returned fallback/empty, try Groq directly
-        if len(suggestions) <= 5 and os.getenv("GROQ_API_KEY"):
+        # Detect fallback landmarks: they follow the pattern "CityName + generic type"
+        is_fallback = len(suggestions) > 0 and any(
+            s.name.startswith(request.city) and any(g in s.name for g in ['National Museum', 'Central Park', 'City Hall', 'University', 'Art Gallery'])
+            for s in suggestions[:3]
+        )
+        if (len(suggestions) <= 5 or is_fallback) and os.getenv("GROQ_API_KEY"):
             from app.services.ai_reasoning.service import GroqReasoningService
             try:
                 logger.info("[DISCOVER] Primary AI returned few results, trying Groq fallback...")
