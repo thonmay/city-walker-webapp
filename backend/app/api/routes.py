@@ -1188,13 +1188,35 @@ async def batch_geocode_places(request: BatchGeocodeRequest) -> BatchGeocodeResp
 async def get_city_center(city: str) -> dict:
     """Get the center coordinates of a city.
     
-    Used to center the map when user mentions a city.
+    Uses MapTiler (primary) with Nominatim fallback.
     """
     try:
         async with httpx.AsyncClient(
             timeout=10.0,
             headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
         ) as client:
+            # MapTiler primary
+            maptiler_key = os.getenv("MAPTILER_KEY")
+            if maptiler_key:
+                try:
+                    response = await client.get(
+                        f"https://api.maptiler.com/geocoding/{quote_plus(city)}.json",
+                        params={"key": maptiler_key, "types": "municipality,place", "limit": 1},
+                    )
+                    response.raise_for_status()
+                    features = response.json().get("features", [])
+                    if features:
+                        coords = features[0]["geometry"]["coordinates"]
+                        return {
+                            "success": True,
+                            "lat": coords[1],
+                            "lng": coords[0],
+                            "display_name": features[0].get("place_name", city),
+                        }
+                except Exception:
+                    pass
+
+            # Nominatim fallback
             response = await client.get(
                 "https://nominatim.openstreetmap.org/search",
                 params={
@@ -1248,7 +1270,7 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
     place_service = get_place_service()
     wikipedia_service = get_wikipedia_service()
     
-    # Get city center for distance filtering
+    # Get city center for distance filtering (MapTiler primary, Nominatim fallback)
     city_center = None
     MAX_DISTANCE_KM = 30.0
     try:
@@ -1256,17 +1278,35 @@ async def lookup_pois(request: LookupPOIsRequest) -> LookupPOIsResponse:
             timeout=8.0,
             headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
         ) as client:
-            resp = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={"q": request.city, "format": "json", "limit": 1, "featuretype": "city"},
-            )
-            resp.raise_for_status()
-            city_results = resp.json()
-            if city_results:
-                city_center = {
-                    "lat": float(city_results[0]["lat"]),
-                    "lng": float(city_results[0]["lon"]),
-                }
+            # Try MapTiler first (no rate limit issues)
+            maptiler_key = os.getenv("MAPTILER_KEY")
+            if maptiler_key:
+                try:
+                    resp = await client.get(
+                        f"https://api.maptiler.com/geocoding/{quote_plus(request.city)}.json",
+                        params={"key": maptiler_key, "types": "municipality,place", "limit": 1},
+                    )
+                    resp.raise_for_status()
+                    features = resp.json().get("features", [])
+                    if features:
+                        coords = features[0]["geometry"]["coordinates"]
+                        city_center = {"lat": coords[1], "lng": coords[0]}
+                except Exception:
+                    pass
+            
+            # Fallback to Nominatim
+            if not city_center:
+                resp = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": request.city, "format": "json", "limit": 1, "featuretype": "city"},
+                )
+                resp.raise_for_status()
+                city_results = resp.json()
+                if city_results:
+                    city_center = {
+                        "lat": float(city_results[0]["lat"]),
+                        "lng": float(city_results[0]["lon"]),
+                    }
     except Exception:
         pass  # Proceed without distance filtering
     
@@ -1460,40 +1500,55 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
         ai_service = get_ai_service()
         wikipedia_service = get_wikipedia_service()
         
-        # 1. Get city center for map
+        # 1. Get city center for map (MapTiler primary, Nominatim fallback)
         geocode_start = time_module.time()
         city_center = None
         async with httpx.AsyncClient(
             timeout=10.0,
             headers={"User-Agent": "CityWalker/1.0 (contact@citywalker.app)"}
         ) as client:
-            # Retry city center geocoding (Nominatim can 429 if we've been busy)
-            for attempt in range(3):
+            # Try MapTiler first (no rate limit)
+            maptiler_key = os.getenv("MAPTILER_KEY")
+            if maptiler_key:
                 try:
-                    response = await client.get(
-                        "https://nominatim.openstreetmap.org/search",
-                        params={
-                            "q": request.city,
-                            "format": "json",
-                            "limit": 1,
-                            "featuretype": "city",
-                        },
+                    resp = await client.get(
+                        f"https://api.maptiler.com/geocoding/{quote_plus(request.city)}.json",
+                        params={"key": maptiler_key, "types": "municipality,place", "limit": 1},
                     )
-                    response.raise_for_status()
-                    results = response.json()
-                    if results:
-                        city_center = {
-                            "lat": float(results[0]["lat"]),
-                            "lng": float(results[0]["lon"]),
-                        }
-                    break
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 429 and attempt < 2:
-                        wait = 2.0 * (attempt + 1)
-                        logger.info(f"[DISCOVER] Nominatim 429, retrying in {wait}s...")
-                        await asyncio.sleep(wait)
-                    else:
-                        raise
+                    resp.raise_for_status()
+                    features = resp.json().get("features", [])
+                    if features:
+                        coords = features[0]["geometry"]["coordinates"]
+                        city_center = {"lat": coords[1], "lng": coords[0]}
+                except Exception:
+                    pass
+            
+            # Fallback to Nominatim with retry
+            if not city_center:
+                for attempt in range(3):
+                    try:
+                        response = await client.get(
+                            "https://nominatim.openstreetmap.org/search",
+                            params={
+                                "q": request.city,
+                                "format": "json",
+                                "limit": 1,
+                                "featuretype": "city",
+                            },
+                        )
+                        response.raise_for_status()
+                        results = response.json()
+                        if results:
+                            city_center = {
+                                "lat": float(results[0]["lat"]),
+                                "lng": float(results[0]["lon"]),
+                            }
+                        break
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 429 and attempt < 2:
+                            await asyncio.sleep(2.0 * (attempt + 1))
+                        else:
+                            break
         
         if not city_center:
             return DiscoverResponse(
@@ -1704,12 +1759,12 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             "pois": pois,
         }
         
-        if pois:
+        if pois and len(pois) >= 10:
             logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — caching {len(pois)} POIs")
             _discover_cache.set(cache_key, response_dict)
             await _redis_set_discover(cache_key, response_dict, ttl=86400)
         else:
-            logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — 0 POIs, NOT caching")
+            logger.info(f"[DISCOVER] Total pipeline: {total_elapsed:.1f}s — {len(pois)} POIs, NOT caching (below threshold)")
         
         return DiscoverResponse(**response_dict)
         
