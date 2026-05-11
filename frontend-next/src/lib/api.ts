@@ -10,7 +10,8 @@ export async function createRouteFromSelection(
   pois: POI[],
   transportMode: string = 'walking',
   homeBase?: HomeBase | null,
-  numDays: number = 1
+  numDays: number = 1,
+  city?: string
 ): Promise<{ success: boolean; itinerary?: Itinerary; error?: string }> {
   try {
     const response = await fetch(`${API_BASE_URL}/route/from-selection`, {
@@ -34,6 +35,7 @@ export async function createRouteFromSelection(
         starting_location: homeBase?.address,
         starting_coordinates: homeBase?.coordinates,
         num_days: numDays,
+        city: city,
       }),
     });
 
@@ -93,4 +95,64 @@ export async function discoverFood(
   })
     .then(r => r.json())
     .catch(() => ({ success: false, pois: [] }));
+}
+
+
+export async function saveTrip(
+  itinerary: Record<string, unknown>
+): Promise<{ success: boolean; trip_id?: string; share_url?: string; error?: string }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/trips`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itinerary }),
+    });
+    return await response.json();
+  } catch {
+    return { success: false, error: 'Failed to save trip' };
+  }
+}
+
+export async function getTrip(
+  tripId: string
+): Promise<{ success: boolean; itinerary?: Itinerary; error?: string }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/trips/${tripId}`);
+    if (!response.ok) return { success: false, error: 'Trip not found' };
+    return await response.json();
+  } catch {
+    return { success: false, error: 'Failed to load trip' };
+  }
+}
+
+export async function getWeather(
+  lat: number,
+  lng: number,
+  days: number = 7
+): Promise<{
+  success: boolean;
+  forecast?: Array<{
+    date: string;
+    temp_max: number;
+    temp_min: number;
+    precipitation_mm: number;
+    description: string;
+    is_rainy: boolean;
+  }>;
+  recommendation?: string;
+}> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/weather`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lat, lng, days }),
+    });
+    return await response.json();
+  } catch {
+    return { success: false };
+  }
+}
+
+export function getTripPdfUrl(tripId: string): string {
+  return `${API_BASE_URL}/trips/${tripId}/pdf`;
 }

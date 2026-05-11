@@ -2,25 +2,27 @@
 
 import { useState } from 'react';
 import type { Itinerary } from '@/types';
+import { getTripPdfUrl } from '@/lib/api';
 
 interface ShareModalProps {
   itinerary: Itinerary;
+  tripId: string | null;
   onClose: () => void;
 }
 
-export function ShareModal({ itinerary, onClose }: ShareModalProps) {
-  const [copied, setCopied] = useState(false);
-  const url = itinerary.google_maps_url ?? '';
+export function ShareModal({ itinerary, tripId, onClose }: ShareModalProps) {
+  const [copiedMaps, setCopiedMaps] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const mapsUrl = itinerary.google_maps_url ?? '';
+  const shareUrl = tripId ? `${window.location.origin}/trips/${tripId}` : '';
 
-  const handleCopy = async () => {
-    if (!url) return;
+  const handleCopy = async (text: string, setter: (v: boolean) => void) => {
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API can fail on insecure contexts; user can copy manually.
-    }
+      await navigator.clipboard.writeText(text);
+      setter(true);
+      setTimeout(() => setter(false), 2000);
+    } catch { /* clipboard can fail on insecure contexts */ }
   };
 
   return (
@@ -49,35 +51,74 @@ export function ShareModal({ itinerary, onClose }: ShareModalProps) {
           </button>
         </div>
 
-        {url ? (
-          <>
-            <label
-              className="text-xs font-medium uppercase tracking-widest block mb-2"
-              style={{ color: 'var(--ink-light)' }}
-            >
-              Google Maps link
+        {/* Share link */}
+        {shareUrl && (
+          <div className="mb-4">
+            <label className="text-xs font-medium uppercase tracking-widest block mb-2" style={{ color: 'var(--ink-light)' }}>
+              Share link
             </label>
             <div className="flex gap-2">
               <input
                 type="text"
-                value={url}
+                value={shareUrl}
                 readOnly
                 onFocus={(e) => e.currentTarget.select()}
                 className="flex-1 glass border border-white/60 rounded-xl px-3 py-2 text-sm"
                 style={{ color: 'var(--ink)' }}
               />
               <button
-                onClick={handleCopy}
+                onClick={() => handleCopy(shareUrl, setCopiedLink)}
                 className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black rounded-xl font-medium text-sm transition-colors"
               >
-                {copied ? 'Copied!' : 'Copy'}
+                {copiedLink ? 'Copied!' : 'Copy'}
               </button>
             </div>
-            <p className="text-xs mt-3" style={{ color: 'var(--ink-light)' }}>
-              Opens your route in Google Maps with all waypoints.
-            </p>
-          </>
-        ) : (
+          </div>
+        )}
+
+        {/* Google Maps link */}
+        {mapsUrl && (
+          <div className="mb-4">
+            <label className="text-xs font-medium uppercase tracking-widest block mb-2" style={{ color: 'var(--ink-light)' }}>
+              Google Maps
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={mapsUrl}
+                readOnly
+                onFocus={(e) => e.currentTarget.select()}
+                className="flex-1 glass border border-white/60 rounded-xl px-3 py-2 text-sm"
+                style={{ color: 'var(--ink)' }}
+              />
+              <button
+                onClick={() => handleCopy(mapsUrl, setCopiedMaps)}
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black rounded-xl font-medium text-sm transition-colors"
+              >
+                {copiedMaps ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* PDF Download */}
+        {tripId && (
+          <div className="mb-2">
+            <a
+              href={getTripPdfUrl(tripId)}
+              download
+              className="flex items-center justify-center gap-2 w-full px-4 py-2.5 border border-amber-500/30 rounded-xl text-sm font-medium transition-colors hover:bg-amber-50"
+              style={{ color: 'var(--ink)' }}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M8 2V10M8 10L5 7M8 10L11 7M3 13H13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              Download PDF itinerary
+            </a>
+          </div>
+        )}
+
+        {!shareUrl && !mapsUrl && (
           <p className="text-sm" style={{ color: 'var(--ink-light)' }}>
             No share link available for this itinerary yet.
           </p>

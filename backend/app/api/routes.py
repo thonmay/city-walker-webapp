@@ -18,6 +18,7 @@ from urllib.parse import quote_plus
 import asyncio
 import logging
 import math
+import os
 import time as time_module
 
 import httpx
@@ -391,6 +392,31 @@ def classify_interests(interests: list[str] | None) -> tuple[bool, bool]:
         return (True, False)
     
     return (has_ai_interests, has_osm_interests)
+
+
+async def geocode_with_maptiler(client: httpx.AsyncClient, query: str, proximity: tuple[float, float] | None = None) -> dict | None:
+    """Try MapTiler geocoder — fast, no per-second rate limit, supports POI names."""
+    maptiler_key = os.getenv("MAPTILER_KEY")
+    if not maptiler_key:
+        return None
+    try:
+        params = {"key": maptiler_key, "limit": 3}
+        if proximity:
+            params["proximity"] = f"{proximity[1]},{proximity[0]}"  # lng,lat
+        response = await client.get(
+            f"https://api.maptiler.com/geocoding/{quote_plus(query)}.json",
+            params=params,
+        )
+        response.raise_for_status()
+        data = response.json()
+        features = data.get("features", [])
+        if features:
+            coords = features[0]["geometry"]["coordinates"]  # [lng, lat]
+            place_name = features[0].get("place_name", features[0].get("text", ""))
+            return {"lat": coords[1], "lng": coords[0], "display_name": place_name, "source": "maptiler"}
+    except Exception:
+        pass
+    return None
 
 
 async def geocode_with_nominatim(client: httpx.AsyncClient, query: str) -> dict | None:
@@ -1558,100 +1584,42 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                 admission_url = getattr(suggestion, 'admission_url', None)
                 
                 try:
-                    # Geocode with Nominatim first, Photon fallback
+                    # Geocode with MapTiler (fast, parallel-safe) then Photon fallback
                     query = f"{name}, {request.city}"
                     coords = None
                     address = None
                     opening_hours_text = None
                     
-                    # Calculate viewbox (bounding box) around city center
-                    # 1 degree latitude ≈ 111km, so offset = radius_km / 111
-                    lat_offset = MAX_DISTANCE_KM / 111.0
-                    lng_offset = lat_offset / max(0.1, math.cos(math.radians(city_center["lat"])))
-                    viewbox = f"{city_center['lng']-lng_offset},{city_center['lat']+lat_offset},{city_center['lng']+lng_offset},{city_center['lat']-lat_offset}"
+                    # Calculate max distance for validation
+                    proximity = (city_center["lat"], city_center["lng"])
                     
-                    # --- Attempt 1: Nominatim (precise, has extratags) ---
-                    response = await shared_client.get(
-                        "https://nominatim.openstreetmap.org/search",
-                        params={
-                            "q": query,
-                            "format": "json",
-                            "limit": 5,
-                            "addressdetails": 1,
-                            "extratags": 1,
-                            "viewbox": viewbox,
-                            "bounded": 0,
-                        },
-                    )
-                    response.raise_for_status()
-                    results = response.json()
-                    
-                    # Find the closest result to city center
-                    best_result = None
-                    best_distance = float('inf')
-                    
-                    for result in results:
-                        result_lat = float(result["lat"])
-                        result_lng = float(result["lon"])
-                        distance = haversine_distance(
+                    # Try MapTiler first (no rate limit, fast)
+                    mt_result = await geocode_with_maptiler(shared_client, query, proximity)
+                    if mt_result:
+                        dist = haversine_distance(
                             city_center["lat"], city_center["lng"],
-                            result_lat, result_lng
+                            mt_result["lat"], mt_result["lng"]
                         )
-                        
-                        if distance < MAX_DISTANCE_KM and distance < best_distance:
-                            best_distance = distance
-                            best_result = result
+                        if dist < MAX_DISTANCE_KM:
+                            coords = {"lat": mt_result["lat"], "lng": mt_result["lng"]}
+                            address = mt_result.get("display_name", "")
+                            logger.info(f"[DISCOVER] Geocoded {name} via MapTiler: {dist:.1f}km from center")
                     
-                    if best_result:
-                        coords = {
-                            "lat": float(best_result["lat"]),
-                            "lng": float(best_result["lon"]),
-                        }
-                        address = best_result.get("display_name", "")
-                        extratags = best_result.get("extratags", {})
-                        opening_hours_text = extratags.get("opening_hours")
-                        logger.info(f"[DISCOVER] Geocoded {name} via Nominatim: {best_distance:.1f}km from center")
-                    
-                    # --- Attempt 2: Photon fallback (fuzzy, multilingual) ---
+                    # Fallback to Photon if MapTiler missed
                     if not coords:
-                        logger.info(f"[DISCOVER] Nominatim miss for {name}, trying Photon...")
-                        try:
-                            photon_resp = await shared_client.get(
-                                "https://photon.komoot.io/api/",
-                                params={"q": query, "limit": 5},
+                        photon_result = await geocode_with_photon(shared_client, query, request.city)
+                        if photon_result:
+                            dist = haversine_distance(
+                                city_center["lat"], city_center["lng"],
+                                photon_result["lat"], photon_result["lng"]
                             )
-                            photon_resp.raise_for_status()
-                            features = photon_resp.json().get("features", [])
-                            
-                            # Find closest feature within radius
-                            for feature in features:
-                                fc = feature["geometry"]["coordinates"]
-                                f_lat, f_lng = fc[1], fc[0]
-                                dist = haversine_distance(
-                                    city_center["lat"], city_center["lng"],
-                                    f_lat, f_lng,
-                                )
-                                if dist < MAX_DISTANCE_KM and dist < best_distance:
-                                    best_distance = dist
-                                    coords = {"lat": f_lat, "lng": f_lng}
-                                    props = feature.get("properties", {})
-                                    address = f"{props.get('name', name)}, {props.get('city', request.city)}"
-                                    logger.info(f"[DISCOVER] Geocoded {name} via Photon: {dist:.1f}km from center")
-                                    break
-                        except Exception as photon_err:
-                            logger.info(f"[DISCOVER] Photon also failed for {name}: {photon_err}")
+                            if dist < MAX_DISTANCE_KM:
+                                coords = {"lat": photon_result["lat"], "lng": photon_result["lng"]}
+                                address = photon_result.get("display_name", "")
+                                logger.info(f"[DISCOVER] Geocoded {name} via Photon: {dist:.1f}km from center")
                     
                     if not coords:
                         logger.info(f"[DISCOVER] No results from either geocoder for: {name}")
-                        return None
-                    
-                    # Final distance validation — reject anything beyond 30km
-                    final_dist = haversine_distance(
-                        city_center["lat"], city_center["lng"],
-                        coords["lat"], coords["lng"],
-                    )
-                    if final_dist > MAX_DISTANCE_KM:
-                        logger.info(f"[DISCOVER] Rejected {name}: {final_dist:.1f}km from center (>{MAX_DISTANCE_KM}km)")
                         return None
                     
                     # Fetch images + validate admission URL concurrently
@@ -1711,16 +1679,13 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
                     logger.info(f"[DISCOVER] Error enriching {name}: {e}")
                     return None
             
-            # Run enrichments with limited concurrency to avoid rate limiting
-            # Nominatim allows ~1 req/sec — use semaphore(3) + delay
+            # Run enrichments in parallel (MapTiler has no per-second rate limit)
             logger.info("[DISCOVER] Enriching places in parallel...")
-            semaphore = asyncio.Semaphore(3)
+            semaphore = asyncio.Semaphore(10)  # Limit concurrent connections
             
             async def enrich_with_limit(suggestion):
                 async with semaphore:
-                    result = await enrich_place(suggestion)
-                    await asyncio.sleep(0.35)  # Respect Nominatim rate limit
-                    return result
+                    return await enrich_place(suggestion)
             
             enriched = await asyncio.gather(*[enrich_with_limit(s) for s in suggestions])
             
@@ -1769,6 +1734,7 @@ class CreateRouteFromSelectionRequest(BaseModel):
     starting_location: Optional[str] = None
     starting_coordinates: Optional[dict] = None
     num_days: int = Field(default=1, ge=1, le=7, description="Number of days for the trip")
+    city: Optional[str] = Field(None, description="City name for the itinerary")
 
 
 class CreateRouteFromSelectionResponse(BaseModel):
@@ -1914,7 +1880,7 @@ async def create_route_from_selection(request: CreateRouteFromSelectionRequest) 
         if len(route.ordered_pois) > 3:
             stops_preview += f" and {len(route.ordered_pois) - 3} more"
         
-        city = pois[0].address.split(",")[-2].strip() if pois[0].address and "," in pois[0].address else "the city"
+        city = request.city or (pois[0].address.split(",")[-2].strip() if pois[0].address and "," in pois[0].address else "the city")
         
         if starting_poi:
             if num_days > 1:
@@ -2257,3 +2223,222 @@ async def discover_famous_food(request: DiscoverFoodRequest) -> DiscoverFoodResp
             category=request.category,
             error=str(e),
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Trip Persistence — Save & Share
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class SaveTripRequest(BaseModel):
+    """Request to save a trip for sharing."""
+    itinerary: dict = Field(..., description="Full itinerary object to persist")
+
+
+class SaveTripResponse(BaseModel):
+    success: bool = True
+    trip_id: str = ""
+    share_url: str = ""
+    error: str | None = None
+
+
+@router.post("/trips", response_model=SaveTripResponse)
+async def save_trip(request: SaveTripRequest):
+    """Save an itinerary and return a shareable link."""
+    from app.services.trips import save_trip as _save_trip
+
+    try:
+        trip_id = _save_trip(request.itinerary)
+        return SaveTripResponse(
+            success=True,
+            trip_id=trip_id,
+            share_url=f"/trips/{trip_id}",
+        )
+    except Exception as e:
+        logger.exception("Failed to save trip")
+        return SaveTripResponse(success=False, error=str(e))
+
+
+@router.get("/trips/{trip_id}")
+async def get_trip(trip_id: str):
+    """Retrieve a saved trip by its short ID."""
+    from app.services.trips import get_trip as _get_trip
+
+    itinerary = _get_trip(trip_id)
+    if not itinerary:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    return {"success": True, "itinerary": itinerary}
+
+
+@router.get("/trips")
+async def list_trips():
+    """List recent trips (metadata only)."""
+    from app.services.trips import list_recent_trips
+
+    trips = list_recent_trips()
+    return {"success": True, "trips": trips}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PDF Export
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@router.get("/trips/{trip_id}/pdf")
+async def export_trip_pdf(trip_id: str):
+    """Generate a downloadable PDF itinerary for a saved trip."""
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from fpdf import FPDF
+
+    from app.services.trips import get_trip as _get_trip
+
+    itinerary = _get_trip(trip_id)
+    if not itinerary:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Title
+    pdf.set_font("Helvetica", "B", 20)
+    city = itinerary.get("city", "Trip")
+    pdf.cell(0, 12, f"Walking Tour: {city}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # Meta info
+    pdf.set_font("Helvetica", "", 10)
+    mode = itinerary.get("transport_mode", "walking")
+    total_days = itinerary.get("total_days", 1)
+    pdf.cell(0, 6, f"Transport: {mode} | Days: {total_days}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(6)
+
+    # Day-by-day breakdown
+    days = itinerary.get("days") or []
+    pois_flat = itinerary.get("pois") or []
+
+    if days:
+        for day in days:
+            pdf.set_font("Helvetica", "B", 14)
+            theme = day.get("theme", "Exploration")
+            pdf.cell(0, 10, f"Day {day.get('day_number', '?')}: {theme}", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(2)
+
+            for i, poi in enumerate(day.get("pois", []), 1):
+                _render_poi_to_pdf(pdf, i, poi)
+
+            pdf.ln(4)
+    elif pois_flat:
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 10, "Itinerary", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        for i, poi in enumerate(pois_flat, 1):
+            _render_poi_to_pdf(pdf, i, poi)
+
+    # Route summary
+    route = itinerary.get("route")
+    if route:
+        pdf.ln(6)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Route Summary", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        dist_km = route.get("total_distance", 0) / 1000
+        dur_min = route.get("total_duration", 0) // 60
+        pdf.cell(0, 6, f"Total distance: {dist_km:.1f} km | Walking time: {dur_min} min", new_x="LMARGIN", new_y="NEXT")
+
+    # Google Maps link
+    maps_url = itinerary.get("google_maps_url")
+    if maps_url:
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.cell(0, 5, "Google Maps: (open link in browser)", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 200)
+        pdf.cell(0, 5, maps_url[:120], new_x="LMARGIN", new_y="NEXT", link=maps_url)
+        pdf.set_text_color(0, 0, 0)
+
+    # Footer
+    pdf.ln(8)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.cell(0, 5, f"Generated by City Walker | {datetime.now().strftime('%Y-%m-%d')}", new_x="LMARGIN", new_y="NEXT")
+
+    # Output
+    buf = BytesIO()
+    pdf.output(buf)
+    buf.seek(0)
+
+    filename = f"city-walker-{city.lower().replace(' ', '-')}-{trip_id}.pdf"
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _render_poi_to_pdf(pdf: "FPDF", index: int, poi: dict) -> None:
+    """Render a single POI entry in the PDF."""
+    name = poi.get("name", "Unknown")
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, f"  {index}. {name}", new_x="LMARGIN", new_y="NEXT")
+
+    details = []
+    if poi.get("why_visit"):
+        details.append(poi["why_visit"])
+    if poi.get("admission"):
+        details.append(f"Admission: {poi['admission']}")
+    duration = poi.get("visit_duration_minutes")
+    if duration:
+        details.append(f"~{duration} min")
+
+    if details:
+        pdf.set_font("Helvetica", "", 9)
+        pdf.cell(0, 5, f"     {' | '.join(details)}", new_x="LMARGIN", new_y="NEXT")
+
+    if poi.get("address"):
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(100, 100, 100)
+        pdf.cell(0, 4, f"     {poi['address']}", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
+
+    pdf.ln(2)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Weather — Open-Meteo (free, no API key)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class WeatherRequest(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
+    days: int = Field(default=7, ge=1, le=16)
+
+
+@router.post("/weather")
+async def get_weather(request: WeatherRequest):
+    """Get weather forecast for trip planning. Free via Open-Meteo."""
+    from app.services.weather import get_weather_forecast
+
+    forecast = await get_weather_forecast(request.lat, request.lng, request.days)
+    rainy_days = [d.date for d in forecast if d.is_rainy]
+
+    return {
+        "success": True,
+        "forecast": [
+            {
+                "date": d.date,
+                "temp_max": d.temp_max,
+                "temp_min": d.temp_min,
+                "precipitation_mm": d.precipitation_mm,
+                "description": d.description,
+                "is_rainy": d.is_rainy,
+            }
+            for d in forecast
+        ],
+        "rainy_days": rainy_days,
+        "recommendation": (
+            f"Rain expected on {len(rainy_days)} day(s). Consider indoor alternatives."
+            if rainy_days else "Good weather ahead! Perfect for walking tours."
+        ),
+    }

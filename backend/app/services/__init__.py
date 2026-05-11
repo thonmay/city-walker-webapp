@@ -12,6 +12,7 @@ Service layer components:
 from .cache import CacheService, RedisCacheService
 from .ai_reasoning import (
     AIReasoningService,
+    CerebrasReasoningService,
     GeminiReasoningService,
     GroqReasoningService,
     RankedPOI,
@@ -38,6 +39,7 @@ __all__ = [
     "RedisCacheService",
     # AI reasoning
     "AIReasoningService",
+    "CerebrasReasoningService",
     "GeminiReasoningService",
     "GroqReasoningService",
     "RankedPOI",

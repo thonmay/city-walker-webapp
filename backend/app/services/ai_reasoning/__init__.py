@@ -1,7 +1,8 @@
-"""AI Reasoning — Groq (primary) + Gemini (fallback)."""
+"""AI Reasoning — Cerebras (primary) + Groq + Gemini (fallback)."""
 
 from .service import (
     AIReasoningService,
+    CerebrasReasoningService,
     GeminiReasoningService,
     GroqReasoningService,
     RankedPOI,
@@ -11,6 +12,7 @@ from .service import (
 
 __all__ = [
     "AIReasoningService",
+    "CerebrasReasoningService",
     "GeminiReasoningService",
     "GroqReasoningService",
     "RankedPOI",

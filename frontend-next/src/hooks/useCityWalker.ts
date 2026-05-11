@@ -8,7 +8,7 @@
 import { useState, useCallback, useRef, useMemo } from 'react';
 import type { TransportMode } from '@/components/TransportModeSelector';
 import type { HomeBase } from '@/components/HomeBaseInput';
-import { createRouteFromSelection, discoverPois, discoverFood } from '@/lib/api';
+import { createRouteFromSelection, discoverPois, discoverFood, saveTrip } from '@/lib/api';
 import { DEFAULT_CENTER, MAX_SINGLE_DAY_POIS, MAX_TOTAL_POIS } from '@/lib/config';
 import type { Itinerary, POI, Coordinates } from '@/types';
 
@@ -59,6 +59,7 @@ export function useCityWalker() {
   const [tripDays, setTripDays] = useState(1);
   const [showTripSettings, setShowTripSettings] = useState(false);
   const [homeBase, setHomeBase] = useState<HomeBase | null>(null);
+  const [tripId, setTripId] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -147,6 +148,7 @@ export function useCityWalker() {
     setSearchQuery('');
     setError(null);
     setCurrentCity('');
+    setTripId(null);
   }, []);
 
   // --- Background image enrichment (fallback when backend returns no photos) ---
@@ -304,13 +306,17 @@ export function useCityWalker() {
     setError(null);
 
     const selected = discoveredPois.filter(p => acceptedPois.has(p.place_id));
-    const result = await createRouteFromSelection(selected, transportMode, homeBase, tripDays);
+    const result = await createRouteFromSelection(selected, transportMode, homeBase, tripDays, currentCity);
 
     setIsGeneratingRoute(false);
 
     if (result.success && result.itinerary) {
       setItinerary(result.itinerary);
       setSelectedPoi(null);
+      // Save trip for sharing
+      saveTrip(result.itinerary as unknown as Record<string, unknown>).then(res => {
+        if (res.success && res.trip_id) setTripId(res.trip_id);
+      });
     } else {
       const raw = result.error ?? '';
       const friendly =
@@ -321,7 +327,7 @@ export function useCityWalker() {
             : raw || 'Could not create route. Please try again.';
       setError(friendly);
     }
-  }, [acceptedPois, discoveredPois, transportMode, homeBase, tripDays]);
+  }, [acceptedPois, discoveredPois, transportMode, homeBase, tripDays, currentCity]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -354,6 +360,7 @@ export function useCityWalker() {
     setHomeBase,
 
     // Derived
+    tripId,
     acceptedCount,
     maxPois,
     limitReached,

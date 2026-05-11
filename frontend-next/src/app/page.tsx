@@ -23,6 +23,7 @@ import { TransportModeSelector } from '@/components/TransportModeSelector';
 import { TripDurationSelector } from '@/components/DayTabs';
 import { HomeBaseInput } from '@/components/HomeBaseInput';
 import { useCityWalker } from '@/hooks/useCityWalker';
+import { WeatherWidget } from '@/components/WeatherWidget';
 
 /* ─── Hoisted static JSX (rendering-hoist-jsx 6.3) ─── */
 const searchIcon = (
@@ -101,7 +102,7 @@ export default function Home() {
     acceptedCount, hasDiscoveredPois,
     maxPois, limitReached,
     visiblePois, isMultiDay, currentDayData,
-    mapItinerary,
+    mapItinerary, tripId,
     handleAccept, handleReject, handleNewTrip,
     handleSearch, handleGenerateRoute,
   } = useCityWalker();
@@ -335,6 +336,13 @@ export default function Home() {
         </div>
       ) : null}
 
+      {/* ─── Weather Widget ─── */}
+      {hasDiscoveredPois && !itinerary ? (
+        <div className="absolute bottom-20 sm:bottom-24 left-4 sm:left-auto sm:right-4 z-999 w-[calc(100%-2rem)] sm:w-72">
+          <WeatherWidget lat={mapCenter.lat} lng={mapCenter.lng} days={tripDays} />
+        </div>
+      ) : null}
+
       {/* ─── Generate Route Button ─── */}
       {hasDiscoveredPois && !itinerary ? (
         <div className={`absolute bottom-4 sm:bottom-6 left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-1000 animate-slide-up ${selectedPoi ? 'hidden sm:block' : ''}`}>
@@ -425,7 +433,7 @@ export default function Home() {
       ) : null}
 
       {shareOpen && itinerary ? (
-        <ShareModal itinerary={itinerary} onClose={() => setShareOpen(false)} />
+        <ShareModal itinerary={itinerary} tripId={tripId} onClose={() => setShareOpen(false)} />
       ) : null}
     </div>
   );

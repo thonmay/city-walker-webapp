@@ -1,8 +1,9 @@
-"""AI Reasoning service — Groq (primary) + Gemini (fallback).
+"""AI Reasoning service — Cerebras (primary) + Groq + Gemini (fallback).
 
-Provider-agnostic base class with two concrete implementations:
-- GroqReasoningService:   Groq LPU, llama-3.1-8b-instant (~1.5s)
-- GeminiReasoningService: Google Gemini, gemma-3-4b-it (~6s fallback)
+Provider-agnostic base class with three concrete implementations:
+- CerebrasReasoningService: Cerebras, gpt-oss-120b (~600+ tok/s, strict JSON schema)
+- GroqReasoningService:     Groq LPU, llama-4-scout-17b-16e-instruct (~1.5s)
+- GeminiReasoningService:   Google Gemini, gemini-2.5-flash-lite (~6s fallback)
 
 Requirements: 1.1, 3.1, 3.2, 3.3, 3.4, 3.6, 3.7
 - AI SHALL NOT generate coordinates, opening hours, or prices
@@ -17,6 +18,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+import httpx
 from dotenv import load_dotenv
 
 from app.models import POI, Route
@@ -119,6 +121,28 @@ class AIReasoningService(ABC):
         if "```" in text:
             return text.split("```")[1].split("```")[0].strip()
         return text
+
+    @staticmethod
+    def _extract_array(text: str) -> list:
+        """Parse JSON text and extract the array, handling object wrappers.
+
+        Some providers (Cerebras json_object mode) wrap arrays in
+        {"type": "array", "items": [...]} since JSON spec requires
+        a top-level object for json_object response_format.
+        """
+        data = json.loads(AIReasoningService._extract_json(text))
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            # Try common wrapper keys
+            for key in ("items", "places", "landmarks", "results", "data", "suggestions"):
+                if key in data and isinstance(data[key], list):
+                    return data[key]
+            # Last resort: find the first list value
+            for v in data.values():
+                if isinstance(v, list):
+                    return v
+        return []
 
     @staticmethod
     def _normalize_landmark_name(name: str) -> str:
@@ -331,7 +355,7 @@ class AIReasoningService(ABC):
 
         try:
             text = await self._generate(prompt, timeout=45.0)
-            data = json.loads(self._extract_json(text))
+            data = self._extract_array(text)
             suggestions: list[LandmarkSuggestion] = []
             seen: set[str] = set()
             for item in data[:n]:
@@ -375,7 +399,7 @@ class AIReasoningService(ABC):
         )
         try:
             text = await self._generate(prompt)
-            rankings = json.loads(self._extract_json(text))
+            rankings = self._extract_array(text)
             ranked = []
             for item in rankings:
                 idx = item.get("index", 0)
@@ -476,7 +500,7 @@ class AIReasoningService(ABC):
         logger.info(f"[{self.provider_name}] Suggesting {key} for {city}")
         try:
             text = await self._generate(prompt, timeout=15.0)
-            data = json.loads(self._extract_json(text))
+            data = self._extract_array(text)
             suggestions: list[LandmarkSuggestion] = []
             seen: set[str] = set()
             for item in data[:limit]:
@@ -506,11 +530,74 @@ class AIReasoningService(ABC):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Provider: Groq  (primary — fast LPU inference, ~1.5s)
+# Provider: Cerebras  (primary — strict JSON schema, 600+ tok/s)
+# ═══════════════════════════════════════════════════════════════════════
+
+class CerebrasReasoningService(AIReasoningService):
+    """Cerebras Inference with strict JSON constrained decoding.
+
+    Uses OpenAI-compatible API. 1M tokens/day free, 30 RPM, no CC.
+    Strict JSON schema mode makes invalid JSON structurally impossible.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self._api_key = api_key or os.getenv("CEREBRAS_API_KEY")
+        if not self._api_key:
+            raise ValueError("CEREBRAS_API_KEY not provided")
+        self._model_name = model_name or os.getenv("CEREBRAS_MODEL", "llama3.1-8b")
+        self._timeout = timeout_seconds
+        self._base_url = "https://api.cerebras.ai/v1"
+        logger.info(f"[AI] Cerebras ready: {self._model_name}")
+
+    @property
+    def provider_name(self) -> str:
+        return "Cerebras"
+
+    async def _generate(self, prompt: str, timeout: float | None = None) -> str:
+        t = timeout or self._timeout
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self._model_name,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=t) as client:
+                resp = await client.post(
+                    f"{self._base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return (data["choices"][0]["message"]["content"] or "").strip()
+        except httpx.TimeoutException:
+            logger.warning(f"[Cerebras] Timeout after {t}s")
+            raise asyncio.TimeoutError()
+        except Exception as e:
+            logger.warning(f"[Cerebras] Error: {e}")
+            raise
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Provider: Groq  (secondary — fast LPU inference, ~1.5s)
 # ═══════════════════════════════════════════════════════════════════════
 
 class GroqReasoningService(AIReasoningService):
-    """Groq LPU with Llama 3.1 8B Instant."""
+    """Groq LPU with Llama 4 Scout 17B."""
 
     def __init__(
         self,
@@ -524,7 +611,7 @@ class GroqReasoningService(AIReasoningService):
         if not self._api_key:
             raise ValueError("GROQ_API_KEY not provided")
         self._client = AsyncGroq(api_key=self._api_key)
-        self._model_name = model_name or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self._model_name = model_name or os.getenv("GROQ_MODEL", "llama-4-scout-17b-16e-instruct")
         self._timeout = timeout_seconds
         logger.info(f"[AI] Groq ready: {self._model_name}")
 
@@ -561,7 +648,7 @@ class GroqReasoningService(AIReasoningService):
 # ═══════════════════════════════════════════════════════════════════════
 
 class GeminiReasoningService(AIReasoningService):
-    """Google Gemini with Gemma 3 4B."""
+    """Google Gemini 2.5 Flash-Lite (tertiary fallback)."""
 
     def __init__(
         self,
@@ -575,7 +662,7 @@ class GeminiReasoningService(AIReasoningService):
         if not self._api_key:
             raise ValueError("GEMINI_API_KEY not provided")
         self._client = genai.Client(api_key=self._api_key)
-        self._model_name = model_name or os.getenv("GEMINI_MODEL", "gemma-3-4b-it")
+        self._model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
         self._timeout = timeout_seconds
         logger.info(f"[AI] Gemini ready: {self._model_name}")
 
@@ -605,11 +692,17 @@ class GeminiReasoningService(AIReasoningService):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Factory: Groq → Gemini
+# Factory: Cerebras → Groq → Gemini
 # ═══════════════════════════════════════════════════════════════════════
 
 def create_ai_service() -> AIReasoningService:
-    """Create the best available AI service.  Groq first, Gemini fallback."""
+    """Create the best available AI service.  Cerebras → Groq → Gemini."""
+    if os.getenv("CEREBRAS_API_KEY"):
+        try:
+            return CerebrasReasoningService()
+        except Exception as e:
+            logger.info(f"[AI] Cerebras init failed: {e}")
+
     if os.getenv("GROQ_API_KEY"):
         try:
             return GroqReasoningService()
@@ -622,4 +715,6 @@ def create_ai_service() -> AIReasoningService:
         except Exception as e:
             logger.info(f"[AI] Gemini init failed: {e}")
 
-    raise ValueError("No AI provider available. Set GROQ_API_KEY or GEMINI_API_KEY in .env")
+    raise ValueError(
+        "No AI provider available. Set CEREBRAS_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY in .env"
+    )
