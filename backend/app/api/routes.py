@@ -1571,6 +1571,22 @@ async def discover_pois(request: DiscoverRequest) -> DiscoverResponse:
             city_lng=city_center["lng"],
         )
         
+        # If primary AI returned fallback/empty, try Groq directly
+        if len(suggestions) <= 5 and os.getenv("GROQ_API_KEY"):
+            from app.services.ai_reasoning.service import GroqReasoningService
+            try:
+                logger.info("[DISCOVER] Primary AI returned few results, trying Groq fallback...")
+                groq_svc = GroqReasoningService()
+                groq_suggestions = await groq_svc.suggest_landmarks(
+                    request.city, request.interests, "walking", None,
+                    city_lat=city_center["lat"], city_lng=city_center["lng"],
+                )
+                if len(groq_suggestions) > len(suggestions):
+                    suggestions = groq_suggestions
+                    logger.info(f"[DISCOVER] Groq fallback returned {len(suggestions)} suggestions")
+            except Exception as e:
+                logger.error(f"[DISCOVER] Groq fallback also failed: {e}")
+        
         # Limit to requested amount
         suggestions = suggestions[:request.limit]
         ai_elapsed = time_module.time() - ai_start

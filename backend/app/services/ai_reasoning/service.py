@@ -356,6 +356,8 @@ class AIReasoningService(ABC):
         try:
             text = await self._generate(prompt, timeout=45.0)
             data = self._extract_array(text)
+            if not data:
+                logger.error(f"[{self.provider_name}] Empty array from response ({len(text)} chars): {text[:200]}")
             suggestions: list[LandmarkSuggestion] = []
             seen: set[str] = set()
             for item in data[:n]:
@@ -571,7 +573,7 @@ class CerebrasReasoningService(AIReasoningService):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "response_format": {"type": "json_object"},
         }
         try:
@@ -583,7 +585,10 @@ class CerebrasReasoningService(AIReasoningService):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                return (data["choices"][0]["message"]["content"] or "").strip()
+                choice = data["choices"][0]
+                if choice.get("finish_reason") == "length":
+                    logger.warning(f"[Cerebras] Response truncated (hit max_tokens)")
+                return (choice["message"]["content"] or "").strip()
         except httpx.TimeoutException:
             logger.warning(f"[Cerebras] Timeout after {t}s")
             raise asyncio.TimeoutError()
