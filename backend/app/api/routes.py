@@ -2363,6 +2363,7 @@ async def list_trips():
 @router.get("/trips/{trip_id}/pdf")
 async def export_trip_pdf(trip_id: str):
     """Generate a downloadable PDF itinerary for a saved trip."""
+    import tempfile
     from io import BytesIO
 
     from fastapi.responses import StreamingResponse
@@ -2374,70 +2375,107 @@ async def export_trip_pdf(trip_id: str):
     if not itinerary:
         raise HTTPException(status_code=404, detail="Trip not found")
 
+    city = itinerary.get("city", "Trip")
+    mode = itinerary.get("transport_mode", "walking")
+    total_days = itinerary.get("total_days", 1)
+    days = itinerary.get("days") or []
+    pois_flat = itinerary.get("pois") or []
+    maps_url = itinerary.get("google_maps_url", "")
+
+    # Download POI images for embedding
+    image_cache: dict[str, str] = {}  # name -> temp file path
+    async with httpx.AsyncClient(timeout=5.0) as img_client:
+        async def download_image(poi: dict) -> None:
+            photos = poi.get("photos") or []
+            if not photos:
+                return
+            name = poi.get("name", "")
+            try:
+                resp = await img_client.get(photos[0])
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    suffix = ".jpg" if "jpeg" in resp.headers.get("content-type", "") or "jpg" in photos[0] else ".png"
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                    tmp.write(resp.content)
+                    tmp.close()
+                    image_cache[name] = tmp.name
+            except Exception:
+                pass
+
+        # Download up to 15 images in parallel
+        all_pois = []
+        if days:
+            for day in days:
+                all_pois.extend(day.get("pois", []))
+        else:
+            all_pois = pois_flat
+        await asyncio.gather(*[download_image(p) for p in all_pois[:15]])
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
     # Title
-    pdf.set_font("Helvetica", "B", 20)
-    city = itinerary.get("city", "Trip")
-    pdf.cell(0, 12, f"Walking Tour: {city}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
-
-    # Meta info
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.cell(0, 14, f"{city} Walking Tour", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
-    mode = itinerary.get("transport_mode", "walking")
-    total_days = itinerary.get("total_days", 1)
-    pdf.cell(0, 6, f"Transport: {mode} | Days: {total_days}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 6, f"{mode.title()} | {total_days} day{'s' if total_days > 1 else ''} | {len(all_pois)} stops", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
     pdf.ln(6)
 
     # Day-by-day breakdown
-    days = itinerary.get("days") or []
-    pois_flat = itinerary.get("pois") or []
-
     if days:
         for day in days:
             pdf.set_font("Helvetica", "B", 14)
             theme = day.get("theme", "Exploration")
             pdf.cell(0, 10, f"Day {day.get('day_number', '?')}: {theme}", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
-
             for i, poi in enumerate(day.get("pois", []), 1):
-                _render_poi_to_pdf(pdf, i, poi)
-
+                _render_poi_to_pdf_with_image(pdf, i, poi, image_cache)
             pdf.ln(4)
     elif pois_flat:
-        pdf.set_font("Helvetica", "B", 14)
-        pdf.cell(0, 10, "Itinerary", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
         for i, poi in enumerate(pois_flat, 1):
-            _render_poi_to_pdf(pdf, i, poi)
+            _render_poi_to_pdf_with_image(pdf, i, poi, image_cache)
 
     # Route summary
     route = itinerary.get("route")
     if route:
-        pdf.ln(6)
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, "Route Summary", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(4)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, "Route Summary", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
         dist_km = route.get("total_distance", 0) / 1000
         dur_min = route.get("total_duration", 0) // 60
-        pdf.cell(0, 6, f"Total distance: {dist_km:.1f} km | Walking time: {dur_min} min", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, f"Total distance: {dist_km:.1f} km | Walking time: ~{dur_min} min", new_x="LMARGIN", new_y="NEXT")
 
-    # Google Maps link
-    maps_url = itinerary.get("google_maps_url")
+    # Google Maps link (clickable)
     if maps_url:
-        pdf.ln(4)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 5, "Google Maps: (open link in browser)", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_text_color(0, 0, 200)
-        pdf.cell(0, 5, maps_url[:120], new_x="LMARGIN", new_y="NEXT", link=maps_url)
+        pdf.ln(6)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, "Open route in Google Maps:", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "U", 9)
+        pdf.set_text_color(0, 80, 180)
+        # Use multi_cell for long URLs so they wrap
+        pdf.multi_cell(0, 5, maps_url, link=maps_url)
         pdf.set_text_color(0, 0, 0)
 
     # Footer
     pdf.ln(8)
     pdf.set_font("Helvetica", "I", 8)
-    pdf.cell(0, 5, f"Generated by City Walker | {datetime.now().strftime('%Y-%m-%d')}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(0, 5, f"Generated by City Walker | {datetime.now().strftime('%Y-%m-%d')} | city-walker-webapp.vercel.app", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+
+    # Cleanup temp images
+    import os as _os
+    for path in image_cache.values():
+        try:
+            _os.unlink(path)
+        except Exception:
+            pass
 
     # Output
     buf = BytesIO()
@@ -2452,12 +2490,29 @@ async def export_trip_pdf(trip_id: str):
     )
 
 
-def _render_poi_to_pdf(pdf: "FPDF", index: int, poi: dict) -> None:
-    """Render a single POI entry in the PDF."""
+def _render_poi_to_pdf_with_image(pdf: "FPDF", index: int, poi: dict, image_cache: dict) -> None:
+    """Render a POI with optional image thumbnail."""
     name = poi.get("name", "Unknown")
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, f"  {index}. {name}", new_x="LMARGIN", new_y="NEXT")
+    img_path = image_cache.get(name)
 
+    y_start = pdf.get_y()
+
+    # Image (if available)
+    if img_path:
+        try:
+            pdf.image(img_path, x=10, y=y_start, w=25, h=18)
+            text_x = 38
+        except Exception:
+            text_x = 12
+    else:
+        text_x = 12
+
+    # POI name
+    pdf.set_xy(text_x, y_start)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, f"{index}. {name}", new_x="LMARGIN", new_y="NEXT")
+
+    # Details
     details = []
     if poi.get("why_visit"):
         details.append(poi["why_visit"])
@@ -2468,14 +2523,20 @@ def _render_poi_to_pdf(pdf: "FPDF", index: int, poi: dict) -> None:
         details.append(f"~{duration} min")
 
     if details:
+        pdf.set_x(text_x)
         pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 5, f"     {' | '.join(details)}", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 5, " | ".join(details), new_x="LMARGIN", new_y="NEXT")
 
     if poi.get("address"):
+        pdf.set_x(text_x)
         pdf.set_font("Helvetica", "", 8)
-        pdf.set_text_color(100, 100, 100)
-        pdf.cell(0, 4, f"     {poi['address']}", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(120, 120, 120)
+        pdf.cell(0, 4, poi["address"], new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(0, 0, 0)
+
+    # Ensure minimum height if image was placed
+    if img_path and pdf.get_y() < y_start + 20:
+        pdf.set_y(y_start + 20)
 
     pdf.ln(2)
 

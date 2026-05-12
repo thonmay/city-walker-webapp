@@ -129,41 +129,77 @@ export default function TripPage() {
       </div>
 
       {/* POI list bottom sheet */}
-      <div className="absolute bottom-0 left-0 right-0 z-50 max-h-[35vh] overflow-y-auto animate-slide-up">
+      <div className="absolute bottom-0 left-0 right-0 z-50 max-h-[40vh] overflow-y-auto animate-slide-up">
         <div
           className="glass border-t border-white/60 px-4 py-3"
           style={{ boxShadow: '0 -4px 24px rgba(26, 26, 46, 0.08)' }}
         >
-          <div className="max-w-2xl mx-auto space-y-1">
-            {itinerary.pois.map((poi, i) => (
-              <div
-                key={poi.place_id}
-                className="flex items-center gap-3 py-2 px-2 rounded-xl transition-colors hover:bg-black/3"
-              >
-                <span
-                  className="w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center shrink-0"
-                  style={{ background: 'var(--compass-gold)', color: 'white' }}
-                >
-                  {i + 1}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate" style={{ color: 'var(--ink)', fontFamily: 'var(--font-body)' }}>
-                    {poi.name}
-                  </p>
-                  {poi.why_visit && (
-                    <p className="text-[11px] truncate" style={{ color: 'var(--ink-light)' }}>{poi.why_visit}</p>
-                  )}
+          <div className="max-w-2xl mx-auto">
+            {itinerary.days && itinerary.days.length > 0 ? (
+              /* Day-separated view */
+              itinerary.days.map(day => (
+                <div key={day.day_number} className="mb-3">
+                  <div className="flex items-center gap-2 mb-1.5 sticky top-0 py-1" style={{ background: 'var(--parchment)' }}>
+                    <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--compass-gold)' }}>
+                      Day {day.day_number}
+                    </span>
+                    {day.theme && (
+                      <span className="text-[10px]" style={{ color: 'var(--ink-light)' }}>
+                        {day.theme}
+                      </span>
+                    )}
+                  </div>
+                  {day.pois.map((poi, i) => (
+                    <div key={poi.place_id} className="flex items-center gap-3 py-1.5 px-2 rounded-xl">
+                      <span
+                        className="w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center shrink-0"
+                        style={{ background: 'var(--compass-gold)', color: 'white' }}
+                      >
+                        {i + 1}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium truncate" style={{ color: 'var(--ink)' }}>{poi.name}</p>
+                        {poi.why_visit && (
+                          <p className="text-[11px] truncate" style={{ color: 'var(--ink-light)' }}>{poi.why_visit}</p>
+                        )}
+                      </div>
+                      {poi.admission && (
+                        <span className="text-[10px] shrink-0 px-2 py-0.5 rounded-full font-medium"
+                          style={{ background: 'var(--parchment-warm)', color: 'var(--ink-light)', border: '1px solid var(--mist)' }}>
+                          {poi.admission}
+                        </span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                {poi.admission && (
-                  <span
-                    className="text-[10px] shrink-0 px-2 py-0.5 rounded-full font-medium"
-                    style={{ background: 'var(--parchment-warm)', color: 'var(--ink-light)', border: '1px solid var(--mist)' }}
-                  >
-                    {poi.admission}
-                  </span>
-                )}
+              ))
+            ) : (
+              /* Flat list fallback */
+              <div className="space-y-1">
+                {itinerary.pois.map((poi, i) => (
+                  <div key={poi.place_id} className="flex items-center gap-3 py-2 px-2 rounded-xl">
+                    <span
+                      className="w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center shrink-0"
+                      style={{ background: 'var(--compass-gold)', color: 'white' }}
+                    >
+                      {i + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium truncate" style={{ color: 'var(--ink)' }}>{poi.name}</p>
+                      {poi.why_visit && (
+                        <p className="text-[11px] truncate" style={{ color: 'var(--ink-light)' }}>{poi.why_visit}</p>
+                      )}
+                    </div>
+                    {poi.admission && (
+                      <span className="text-[10px] shrink-0 px-2 py-0.5 rounded-full font-medium"
+                        style={{ background: 'var(--parchment-warm)', color: 'var(--ink-light)', border: '1px solid var(--mist)' }}>
+                        {poi.admission}
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         </div>
       </div>

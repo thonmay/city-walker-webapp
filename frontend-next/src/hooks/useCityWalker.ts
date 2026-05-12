@@ -210,7 +210,7 @@ export function useCityWalker() {
 
       setError(null);
       setIsStreaming(true);
-      setStreamingProgress('Discovering landmarks...');
+      setStreamingProgress('Discovering landmarks (may take 10-15s)...');
       setDiscoveredPois([]);
       setAcceptedPois(() => new Set());
       setRejectedPois(() => new Set());
@@ -224,7 +224,7 @@ export function useCityWalker() {
       const { signal } = abortControllerRef.current;
 
       try {
-        const data = await discoverPois(city, Math.max(25, tripDays * 12), signal, transportMode);
+        const data = await discoverPois(city, Math.min(30, Math.max(25, tripDays * 10)), signal, transportMode);
 
         if (data.city_center) {
           setMapCenter({ lat: data.city_center.lat, lng: data.city_center.lng });

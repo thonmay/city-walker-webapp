@@ -84,8 +84,8 @@ export async function discoverPois(
   try {
     return await doFetch();
   } catch (err) {
-    // Auto-retry once on server errors (not aborts or client errors)
-    if (err instanceof Error && !err.name.includes('Abort') && err.message.includes('500')) {
+    // Auto-retry once on transient errors (not user aborts)
+    if (err instanceof Error && !err.name.includes('Abort')) {
       await new Promise(r => setTimeout(r, 2000));
       return await doFetch();
     }
