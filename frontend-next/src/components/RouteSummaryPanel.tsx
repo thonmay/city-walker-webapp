@@ -275,6 +275,20 @@ export function RouteSummaryPanel({
             })}
           </div>
 
+          {/* Share & Download Button */}
+          <div className="px-4 pt-3 shrink-0">
+            <button
+              onClick={onShareClick}
+              className="flex items-center justify-center gap-2 w-full py-2.5 font-medium rounded-xl transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] text-sm"
+              style={{ border: '1px solid var(--compass-gold)', color: 'var(--compass-gold)', fontFamily: 'var(--font-body)' }}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M8 2V10M8 10L5 7M8 10L11 7M3 13H13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              Share &amp; Download PDF
+            </button>
+          </div>
+
           {/* Google Maps Button */}
           {itinerary.google_maps_url ? (
             <div className="p-4 shrink-0" style={{ borderTop: '1px solid var(--mist)' }}>
@@ -386,6 +400,20 @@ export function RouteSummaryPanel({
                 </button>
               );
             })}
+          </div>
+
+          {/* Share & Download (mobile) */}
+          <div className="px-3 pt-2 shrink-0">
+            <button
+              onClick={onShareClick}
+              className="flex items-center justify-center gap-2 w-full py-2.5 font-medium rounded-xl transition-all text-sm"
+              style={{ border: '1px solid var(--compass-gold)', color: 'var(--compass-gold)', fontFamily: 'var(--font-body)' }}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M8 2V10M8 10L5 7M8 10L11 7M3 13H13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              Share &amp; Download PDF
+            </button>
           </div>
 
           {/* Google Maps (mobile) */}
